@@ -18,7 +18,7 @@ font files and the SneakyFPV repository for full attribution and usage terms.
 Created by **Alexander van Saase**.
 This project drew inspiration from Alexander's pioneering work on MSP-OSD overlay
 rendering for FPV DVR footage.
-— [https://github.com/walksnal](https://github.com/avsaase/walksnail-osd-tool)
+— [Walksnail OSD Tool](https://github.com/avsaase/walksnail-osd-tool)
 
 ---
 
