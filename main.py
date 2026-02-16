@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QFileDialog, QProgressBar, QGroupBox,
     QCheckBox, QSlider, QComboBox, QGridLayout, QMessageBox,
     QSizePolicy, QSplitter, QScrollArea, QSpinBox, QFrame,
+    QDialog, QLineEdit,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QPixmap, QImage, QPainter, QColor, QPen, QIcon
@@ -30,6 +31,7 @@ from PyQt6.QtGui import QFont, QPixmap, QImage, QPainter, QColor, QPen, QIcon
 
 from srt_parser    import parse_srt, SrtFile
 from osd_parser    import parse_osd, OsdFile, GRID_COLS, GRID_ROWS
+from p1_osd_parser import detect_p1, parse_p1_osd, p1_to_osd_file
 from font_loader   import (fonts_by_firmware, load_font, load_font_from_file,
                            OsdFont, FIRMWARE_PREFIXES)
 from osd_renderer  import OsdRenderConfig, render_osd_frame, render_fallback
@@ -68,48 +70,13 @@ def _hidden_run(*args, **kwargs):
 
 # ─── Theme system ─────────────────────────────────────────────────────────────
 
-_DARK_THEME  = True   # module-level flag; toggled by the theme button
+import theme as _theme_mod   # single source of truth for all colours
 
-# Dark palette (Catppuccin Mocha)
-_D = dict(
-    bg        = "#1e1e2e",  bg2  = "#181825",  bg3  = "#11111b",
-    surface   = "#313244",  surface2 = "#45475a", surface3 = "#585b70",
-    text      = "#cdd6f4",  subtext  = "#a6adc8", muted = "#6c7086",
-    accent    = "#89b4fa",  accent2  = "#b4befe",
-    green     = "#a6e3a1",  red   = "#f38ba8",  orange = "#fab387",
-    border    = "#313244",  border2  = "#45475a",
-    icon      = "#cdd6f4",  # same as text for dark theme
-)
-
-# Light palette — Material Design principles:
-#   • Elevation = lighter surfaces, not darker (buttons sit above background)
-#   • Surface steps are subtle ~4-6% lightness increments, not dramatic jumps
-#   • Text uses opacity levels: 87% (body), 60% (secondary), 38% (disabled/muted)
-#   • Slightly warm-tinted greys feel more natural than pure neutral
-#   • BTN_PRIMARY uses mid-grey fill (not near-black) with dark text
-_L = dict(
-    bg        = "#fafafa",   # base background
-    bg2       = "#f2f2f0",   # inset areas (path labels, spinbox bg)
-    bg3       = "#e8e8e5",   # deeper inset
-    surface   = "#f0f0ee",   # buttons/combos — barely above bg, defined by border
-    surface2  = "#e4e4e1",   # hover state
-    surface3  = "#d8d8d4",   # pressed state
-    text      = "#1c1c1c",   # near-black body text
-    subtext   = "#555552",   # 60% — secondary labels (Video, OSD, SRT, Opacity %)
-    muted     = "#999994",   # 38% — hints, placeholders, disabled
-    accent    = "#555552",   # slider fill, active states — same as subtext, readable not harsh
-    accent2   = "#777774",   # secondary accent
-    green     = "#155a15",   # dark saturated green — readable AND visible
-    red       = "#b01025",   # deep red
-    orange    = "#8a4200",   # dark orange-brown
-    border    = "#ddddd9",   # very subtle border
-    border2   = "#c8c8c4",   # slightly stronger border for inputs
-    icon      = "#3a3a38",   # icons — crisp dark grey
-)
+_DARK_THEME = True   # module-level flag; toggled by the theme button
 
 def _T() -> dict:
-    """Return the active theme palette."""
-    return _D if _DARK_THEME else _L
+    """Return the active theme palette (reads live from theme.py)."""
+    return _theme_mod.get_dark() if _DARK_THEME else _theme_mod.get_light()
 
 
 def _build_styles():
@@ -151,15 +118,15 @@ def _build_styles():
                 f"QPushButton:pressed{{background:{t['surface3']};}}"
                 f"QPushButton:disabled{{background:{t['bg']};color:{t['muted']};"
                 f"border:1px solid {t['border']};}}"
-                f"QPushButton:checked{{background:{t['accent']};color:{t['bg']};border:none;}}")
+                f"QPushButton:checked{{background:{t['accent']};color:{'#ffffff' if is_light else t['bg']};border:none;}}")
     BTN_PRIMARY = (
-        # Light: medium grey fill (#d8d8d4) with near-black text — prominent but not a black slab
+        # Light: blue fill with white text — clear primary action
         # Dark: blue gradient with dark text
-        (f"QPushButton{{background:{t['surface3']};color:{t['text']};"
-         f"border:1px solid {t['border2']};border-radius:8px;}}"
-         f"QPushButton:hover{{background:{t['surface2']};border:1px solid {t['border2']};}}"
-         f"QPushButton:pressed{{background:{t['surface3']};}}"
-         f"QPushButton:disabled{{background:{t['surface']};color:{t['muted']};"
+        (f"QPushButton{{background:{t['accent']};color:#ffffff;"
+         f"border:none;border-radius:8px;font-weight:bold;}}"
+         f"QPushButton:hover{{background:{t['accent2']};}}"
+         f"QPushButton:pressed{{background:{t['accent2']};}}"
+         f"QPushButton:disabled{{background:{t['surface3']};color:{t['muted']};"
          f"border:1px solid {t['border']};}}")
         if is_light else
         (f"QPushButton{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
@@ -171,8 +138,8 @@ def _build_styles():
     )
     BTN_PLAY = (f"QPushButton{{background:{t['surface']};color:{t['text']};"
                 f"border:{btn_border};border-radius:8px;font-size:15px;}}"
-                f"QPushButton:hover{{background:{t['surface2']};}}"
-                f"QPushButton:pressed{{background:{t['accent']};color:{'#ffffff' if is_light else t['bg']};}}"
+                f"QPushButton:hover{{background:{t['surface2']};border:{btn_border_hov};}}"
+                f"QPushButton:pressed{{background:{t['accent']};color:#ffffff;}}"
                 f"QPushButton:disabled{{background:{t['bg']};color:{t['muted']};"
                 f"border:1px solid {t['border']};}}")
     BTN_STOP  = (f"QPushButton{{background:{t['red']};color:#ffffff;"
@@ -476,6 +443,63 @@ class RenderBar(QWidget):
         p.end()
 
 
+class CacheBar(QWidget):
+    """Thin progress bar shown below the frame slider while preview frames are being cached."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(18)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._total   = 0   # total frames to cache
+        self._cached  = 0   # frames cached so far
+        self._visible = False
+        self.setVisible(False)
+
+    def start(self, total: int):
+        self._total   = max(1, total)
+        self._cached  = 0
+        self._visible = True
+        self.setVisible(True)
+        self.update()
+
+    def update_count(self, cached: int):
+        self._cached = cached
+        self.update()
+        if self._cached >= self._total:
+            self.finish()
+
+    def finish(self):
+        self._visible = False
+        self.setVisible(False)
+
+    def paintEvent(self, _e):
+        t = _T()
+        w, h = self.width(), self.height()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = 3
+        # Background track
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(t['surface']))
+        p.drawRoundedRect(0, 0, w, h, r, r)
+        # Fill
+        if self._total > 0:
+            fw = int(w * min(self._cached, self._total) / self._total)
+            if fw > 0:
+                from PyQt6.QtGui import QLinearGradient
+                grad = QLinearGradient(0, 0, fw, 0)
+                grad.setColorAt(0.0, QColor(t['accent']))
+                grad.setColorAt(1.0, QColor(t['accent2']))
+                p.setBrush(grad)
+                p.drawRoundedRect(0, 0, fw, h, r, r)
+        # Label
+        p.setPen(QColor(t['text']))
+        p.setFont(QFont("Segoe UI", 8))
+        label = f"Caching preview…  {self._cached}/{self._total}"
+        p.drawText(0, 0, w, h, Qt.AlignmentFlag.AlignCenter, label)
+        p.end()
+
+
 class RangeSelector(QWidget):
     """Dual-handle in/out trim slider drawn with QPainter."""
     rangeChanged = pyqtSignal(float, float)   # in_pct, out_pct (0.0–1.0)
@@ -672,6 +696,7 @@ class MainWindow(QMainWindow):
         self._font_db:   dict = {}
         self.source_mbps: float = 0.0   # source video bitrate, set after loading
         self._extract_proc = None        # current ffmpeg frame-extract process
+        self._prefetch_stop = False      # signal to stop background prefetch
         self._scrub_timer  = QTimer()    # debounce frame-slider scrubbing
         self._scrub_timer.setSingleShot(True)
         self._scrub_timer.setInterval(80)
@@ -741,8 +766,21 @@ class MainWindow(QMainWindow):
         self._theme_btn.setIcon(_icon("moon-dark.png", 18))
         self._theme_btn.clicked.connect(self._toggle_theme)
 
+        self._palette_btn = QPushButton()
+        self._palette_btn.setFixedSize(30, 30)
+        self._palette_btn.setToolTip("Open theme colour editor")
+        self._palette_btn.setStyleSheet(
+            f"QPushButton{{background:transparent;border:none;border-radius:15px;}}"
+            f"QPushButton:hover{{background:{_T()['surface']};}}"
+        )
+        self._palette_btn.setText("🎨")
+        self._palette_btn.setFont(QFont("Segoe UI", 14))
+        self._palette_btn.clicked.connect(self._open_theme_editor)
+        self._theme_editor_dlg = None   # lazily created
+
         hdr_row.addWidget(h1)
         hdr_row.addStretch()
+        hdr_row.addWidget(self._palette_btn)
         hdr_row.addWidget(self._theme_btn)
         ll.addLayout(hdr_row)
 
@@ -899,6 +937,9 @@ class MainWindow(QMainWindow):
         self.frame_info = QLabel("t = 0.0s  |  OSD —")
         self.frame_info.setStyleSheet(f"color:{_T()['muted']};font-size:10px;")
         cl.addWidget(self.frame_info)
+
+        self.cache_bar = CacheBar()
+        cl.addWidget(self.cache_bar)
 
         # ── Trim range selector ───────────────────────────────────────────────
         trim_hdr = QHBoxLayout()
@@ -1165,13 +1206,19 @@ class MainWindow(QMainWindow):
         _poll_timer.timeout.connect(_poll_gpu)
         _poll_timer.start()
 
-        self.upscale_check = QCheckBox("Upscale output to 1440p")
-        self.upscale_check.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
-        self.upscale_check.setToolTip(
-            "Scale output video to 2560x1440.\n"
-            "Useful when source is 1080p and you want a sharper result on a 1440p+ display."
+        upscale_row = QHBoxLayout()
+        upscale_lbl = QLabel("Upscale output:")
+        upscale_lbl.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
+        self.upscale_combo = QComboBox()
+        self.upscale_combo.addItems(["Off", "1440p  (2560×1440)", "2.7K  (2688×1512)", "4K  (3840×2160)"])
+        self.upscale_combo.setStyleSheet(COMBO_STYLE)
+        self.upscale_combo.setToolTip(
+            "Scale the output video to a higher resolution using Lanczos.\n"
+            "Useful when source is 1080p and you want a sharper result on a high-res display."
         )
-        encgl.addWidget(self.upscale_check)
+        upscale_row.addWidget(upscale_lbl)
+        upscale_row.addWidget(self.upscale_combo, 1)
+        encgl.addLayout(upscale_row)
 
         rl.addWidget(encg)
 
@@ -1361,7 +1408,10 @@ class MainWindow(QMainWindow):
             '.mp4': dirp / (stem + ".mp4"),
         }
         if ext == '.mp4':
-            if candidates['.osd'].exists(): self._load_osd(str(candidates['.osd']))
+            if candidates['.osd'].exists():
+                self._load_osd(str(candidates['.osd']))
+            else:
+                self._try_load_p1_osd(base_path)
             if candidates['.srt'].exists(): self._load_srt(str(candidates['.srt']))
         elif ext == '.osd':
             if candidates['.srt'].exists(): self._load_srt(str(candidates['.srt']))
@@ -1378,12 +1428,36 @@ class MainWindow(QMainWindow):
         _build_styles()
         self._apply_theme()
 
+    def _open_theme_editor(self):
+        """Open (or raise) the palette editor dialog."""
+        from theme_editor import ThemeEditor
+        if self._theme_editor_dlg is None or not self._theme_editor_dlg.isVisible():
+            self._theme_editor_dlg = ThemeEditor(self)
+            self._theme_editor_dlg.applied.connect(self._on_theme_applied)
+            self._theme_editor_dlg.show()
+        else:
+            self._theme_editor_dlg.raise_()
+            self._theme_editor_dlg.activateWindow()
+
+    def _on_theme_applied(self):
+        """Called when user clicks Apply in the editor — reload and repaint."""
+        _theme_mod.load()          # reload saved JSON into _dark / _light dicts
+        _build_styles()            # rebuild all Qt stylesheet strings
+        self._apply_theme()        # repaint live UI
+        if self._theme_editor_dlg:
+            self._theme_editor_dlg.reload_from_theme()   # sync editor panels
+
     def _apply_theme(self):
         """Reapply all stylesheets after a theme change."""
         t = _T()
         self.setStyleSheet(APP_STYLE)
 
-        # Theme button
+        # Palette + theme toggle buttons
+        _icon_btn_ss = (
+            f"QPushButton{{background:transparent;border:none;border-radius:15px;}}"
+            f"QPushButton:hover{{background:{t['surface']};}}"
+        )
+        self._palette_btn.setStyleSheet(_icon_btn_ss)
         self._theme_btn.setIcon(_icon("moon-dark.png" if _DARK_THEME else "moon-light.png", 18))
         self._theme_btn.setStyleSheet(
             f"QPushButton{{background:transparent;border:none;border-radius:15px;}}"
@@ -1486,7 +1560,9 @@ class MainWindow(QMainWindow):
         if self._playing: self._play_pause()   # stop any running playback
         if not self.out_row.path:
             self.out_row.set_path(self._make_output_path(path))
+        self._prefetch_stop = True           # signal any running prefetch to abort
         self.cached_frames.clear()
+        self.cache_bar.finish()
         self._st("Reading video info…")
         self._vi = VideoInfoWorker(path)
         self._vi.result.connect(self._got_vid_info)
@@ -1507,9 +1583,67 @@ class MainWindow(QMainWindow):
             self.vid_card.add_row("Dur",  f"{_dm}:{_ds:02d}")
             self.vid_card.add_row("Size", f"{size_mb} MB")
             self._update_size_hint()
+            # Kick off background prefetch now that we know the duration
+            QTimer.singleShot(400, self._start_prefetch)
         # Trigger preview of frame 0 once we know the duration
         self._refresh_preview()
         self._st("Ready")
+
+    def _start_prefetch(self):
+        """Begin background frame extraction across ~20 evenly-spaced positions."""
+        if not self.video_row.path or self.video_dur <= 0 or not find_ffmpeg():
+            return
+        # 20 evenly-spaced positions: 0, 5, 10, … 95, 100 %
+        positions = list(range(0, 101, 5))
+        # Skip positions already cached
+        to_fetch = [p for p in positions if p not in self.cached_frames]
+        if not to_fetch:
+            return
+        self._prefetch_stop = False
+        self.cache_bar.start(len(to_fetch))
+        threading.Thread(
+            target=self._prefetch_frames,
+            args=(to_fetch,),
+            daemon=True
+        ).start()
+
+    def _prefetch_frames(self, positions):
+        """Worker thread: extract one frame per position, update CacheBar."""
+        ffmpeg = find_ffmpeg()
+        if not ffmpeg: return
+        done = 0
+        for pct in positions:
+            if self._prefetch_stop:
+                break
+            if pct in self.cached_frames:
+                done += 1
+                QTimer.singleShot(0, lambda d=done: self.cache_bar.update_count(d))
+                continue
+            t = self.video_dur * pct / 100.0
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            tmp.close()
+            try:
+                proc = _hidden_popen(
+                    [ffmpeg, "-y", "-ss", str(t), "-i", self.video_row.path,
+                     "-vframes", "1", "-q:v", "3", tmp.name],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                proc.wait(timeout=15)
+                if (not self._prefetch_stop and proc.returncode == 0
+                        and os.path.exists(tmp.name) and PIL_OK):
+                    img = PILImage.open(tmp.name).copy().convert("RGBA")
+                    self.cached_frames[pct] = img
+                    if self.video_frame is None:
+                        self.video_frame = img
+                    done += 1
+                    _d = done
+                    QTimer.singleShot(0, lambda d=_d: self.cache_bar.update_count(d))
+            except Exception:
+                pass
+            finally:
+                try: os.unlink(tmp.name)
+                except: pass
+        QTimer.singleShot(0, self.cache_bar.finish)
 
     def _load_osd(self, path):
         try:
@@ -1537,6 +1671,47 @@ class MainWindow(QMainWindow):
             self._refresh_preview()
         except Exception as e:
             self._st(f"✗ OSD: {e}")
+
+    def _try_load_p1_osd(self, video_path):
+        """Silently try to extract embedded P1 OSD from an MP4. No-op if not a P1 file."""
+        try:
+            if not detect_p1(video_path):
+                return
+            self._st("Detected BetaFPV P1 — extracting embedded OSD…")
+            p1_data = parse_p1_osd(video_path)
+            if not p1_data or not p1_data.frames:
+                self._st("P1 OSD: no frames found")
+                return
+            self.osd_data = p1_to_osd_file(p1_data)
+            s = self.osd_data.stats
+            self.osd_card.clear()
+            self.osd_card.add_row("FC",   s.fc_type or "BetaFPV P1")
+            if s.total_arm_time: self.osd_card.add_row("Arm",  s.total_arm_time)
+            if s.min_battery_v:  self.osd_card.add_row("Batt", f"{s.min_battery_v:.2f}V")
+            if s.max_current_a:  self.osd_card.add_row("Curr", f"{s.max_current_a:.1f}A")
+            if s.used_mah:       self.osd_card.add_row("mAh",  str(s.used_mah))
+            self.osd_card.add_row("Dur",  f"{self.osd_data.duration_ms/1000:.1f}s")
+            self.osd_card.add_row("Pkts", str(self.osd_data.frame_count))
+            self.osd_row.set_path("(embedded in video)")
+            # P1 runs Betaflight over Walksnail/DJI goggles → always uses BTFL_DJI font
+            self._auto_select_font("Betaflight", "BTFL_DJI")
+            self._st(f"✓ P1 OSD: {self.osd_data.frame_count} frames embedded")
+            self._refresh_preview()
+        except Exception as e:
+            self._st(f"✗ P1 OSD: {e}")
+
+    def _auto_select_font(self, firmware: str, preferred_folder: str):
+        """Select firmware in the fw_combo and pick a specific font folder by name."""
+        # Switch firmware tab (Betaflight / INAV / etc.)
+        idx = self.fw_combo.findText(firmware)
+        if idx >= 0 and self.fw_combo.currentIndex() != idx:
+            self.fw_combo.setCurrentIndex(idx)   # triggers _on_fw_changed → rebuilds style_combo
+        # Now find the preferred folder in the style combo
+        for i in range(self.style_combo.count()):
+            if self.style_combo.itemData(i) == preferred_folder:
+                self.style_combo.setCurrentIndex(i)
+                return
+        # Fallback: already set by _on_fw_changed
 
     def _load_srt(self, path):
         try:
@@ -1886,10 +2061,91 @@ class MainWindow(QMainWindow):
             self._make_output_path(self.video_row.path, trim_s, trim_e)
         )
 
+        # ── Overwrite / rename dialog ─────────────────────────────────────────
+        out_path = self.out_row.path
+        if out_path and os.path.exists(out_path):
+            dlg = QDialog(self)
+            dlg.setWindowTitle("File Already Exists")
+            dlg.setMinimumWidth(420)
+            vl = QVBoxLayout(dlg)
+            vl.setSpacing(10)
+            vl.setContentsMargins(18, 18, 18, 14)
+
+            warn_lbl = QLabel(f"⚠  <b>{os.path.basename(out_path)}</b> already exists in this folder.")
+            warn_lbl.setWordWrap(True)
+            warn_lbl.setTextFormat(Qt.TextFormat.RichText)
+            warn_lbl.setStyleSheet(f"color:{_T()['text']};font-size:12px;")
+            vl.addWidget(warn_lbl)
+
+            name_lbl = QLabel("Save as:")
+            name_lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
+            vl.addWidget(name_lbl)
+
+            name_edit = QLineEdit(os.path.basename(out_path))
+            name_edit.setStyleSheet(
+                f"background:{_T()['bg2']};color:{_T()['text']};"
+                f"border:1px solid {_T()['border2']};border-radius:4px;padding:4px 8px;"
+            )
+            name_edit.selectAll()
+            vl.addWidget(name_edit)
+
+            btn_row2 = QHBoxLayout()
+            btn_row2.setSpacing(6)
+            overwrite_btn = QPushButton("Overwrite")
+            overwrite_btn.setStyleSheet(BTN_DANGER)
+            overwrite_btn.setFixedHeight(32)
+            save_as_btn = QPushButton("Save with this name")
+            save_as_btn.setStyleSheet(BTN_PRIMARY)
+            save_as_btn.setFixedHeight(32)
+            cancel_btn2 = QPushButton("Cancel")
+            cancel_btn2.setStyleSheet(BTN_SEC)
+            cancel_btn2.setFixedHeight(32)
+            btn_row2.addWidget(cancel_btn2)
+            btn_row2.addStretch()
+            btn_row2.addWidget(overwrite_btn)
+            btn_row2.addWidget(save_as_btn)
+            vl.addLayout(btn_row2)
+
+            _result = ["cancel"]
+            def _ow():   _result[0] = "overwrite"; dlg.accept()
+            def _sa():
+                new_name = name_edit.text().strip()
+                if not new_name: return
+                if not new_name.lower().endswith(".mp4"):
+                    new_name += ".mp4"
+                new_path = os.path.join(os.path.dirname(out_path), new_name)
+                if os.path.exists(new_path) and new_path != out_path:
+                    name_edit.setStyleSheet(
+                        f"background:{_T()['bg2']};color:{_T()['red']};"
+                        f"border:1px solid {_T()['red']};border-radius:4px;padding:4px 8px;"
+                    )
+                    name_lbl.setText("Save as:  ⚠ that file also exists — pick a different name")
+                    return
+                _result[0] = new_path
+                dlg.accept()
+            def _cancel(): dlg.reject()
+            overwrite_btn.clicked.connect(_ow)
+            save_as_btn.clicked.connect(_sa)
+            cancel_btn2.clicked.connect(_cancel)
+
+            dlg.setStyleSheet(f"background:{_T()['bg']};")
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return   # user cancelled
+            if _result[0] == "cancel":
+                return
+            elif _result[0] != "overwrite":
+                # user chose a new name
+                self.out_row.set_path(_result[0])
+
+        # Upscale target from dropdown
+        _upscale_map = {0: "", 1: "1440p", 2: "2.7k", 3: "4k"}
+        upscale_target = _upscale_map.get(self.upscale_combo.currentIndex(), "")
+
         cfg = ProcessingConfig(
             input_video   = self.video_row.path,
             output_video  = self.out_row.path,
             osd_file      = self.osd_row.path or None,
+            osd_data      = self.osd_data,        # pass in-memory OSD (covers P1 embedded)
             srt_file      = self.srt_row.path or None,
             codec         = codec,
             crf           = crf_val,
@@ -1904,7 +2160,7 @@ class MainWindow(QMainWindow):
             use_hw        = self.hw_check.isChecked(),
             trim_start    = self.trim_sel.in_pct  * self.video_dur,
             trim_end      = self.trim_sel.out_pct * self.video_dur,
-            upscale_1440p = self.upscale_check.isChecked(),
+            upscale_target = upscale_target,
         )
 
         self.render_btn.setEnabled(False)
@@ -1923,7 +2179,9 @@ class MainWindow(QMainWindow):
                 self.osd_warn.setVisible(True)
 
         self.worker = ProcessWorker(cfg)
-        self.worker.progress.connect(lambda p, m: (self.prog.setValue(p), self._st(m)))
+        self.worker.progress.connect(
+            lambda p, m: (self.prog.setValue(p), self._st(m)),
+            Qt.ConnectionType.QueuedConnection)
         self.worker.finished.connect(self._done)
         self.worker.start()
 

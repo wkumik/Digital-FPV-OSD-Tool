@@ -83,7 +83,8 @@ class ProcessingConfig:
     bitrate_mbps:  float = None   # if set, use -b:v instead of -crf
     trim_start:    float = 0.0    # seconds, 0 = beginning
     trim_end:      float = 0.0    # seconds, 0 = end of file
-    upscale_1440p: bool  = False  # scale output to 2560x1440
+    upscale_target: str  = ""     # "" = no upscale | "1440p" | "2.7k" | "4k"
+    osd_data:      object = None  # pre-parsed OsdFile (e.g. P1 embedded OSD)
 
 
 # ── GPU encoder detection ─────────────────────────────────────────────────────
@@ -185,6 +186,13 @@ def detect_hw_encoder(ffmpeg: str) -> Optional[dict]:
                    "-frames:v", "1",
                    "-vf", "format=nv12,hwupload",
                    "-c:v", h264, "-f", "null", "-"]
+        elif "amf" in h264:
+            # AMF requires nv12 input; yuv420p causes an init failure on some drivers
+            cmd = [ffmpeg, "-y",
+                   "-f", "lavfi", "-i", "color=black:size=256x256:rate=30",
+                   "-frames:v", "1",
+                   "-c:v", h264, "-pix_fmt", "nv12",
+                   "-f", "null", "-"]
         else:
             cmd = [ffmpeg, "-y",
                    "-f", "lavfi", "-i", "color=black:size=256x256:rate=30",
@@ -320,7 +328,10 @@ def process_video(
     # ── Load data ─────────────────────────────────────────────────────────────
     osd_data = srt_data = font = None
 
-    if config.osd_file and os.path.isfile(config.osd_file):
+    # Accept pre-parsed OSD data directly (e.g. P1 embedded OSD — no .osd file)
+    if config.osd_data is not None:
+        osd_data = config.osd_data
+    elif config.osd_file and os.path.isfile(config.osd_file):
         try:    osd_data = parse_osd(config.osd_file)
         except Exception as e:
             if progress_callback: progress_callback(0, f"⚠ OSD: {e}")
@@ -383,7 +394,23 @@ def process_video(
             quality_args = ["-cq", str(config.crf)]
         preset_args = ["-preset", "p6"] if "nvenc" in encoder else \
                       (["-preset", "medium"] if "qsv" in encoder else [])
-        pix_fmt_args = ["-pix_fmt", "nv12"] if use_vaapi else ["-pix_fmt", "yuv420p"]
+        # pix_fmt_args: for hardware encoders the filter_complex format= node
+        # already delivers the correct pixel format to the encoder — passing
+        # -pix_fmt after -c:v confuses NVENC on Linux ("Operation not permitted")
+        # and AMF on Windows.  Only VAAPI needs special handling (hwupload path).
+        # CPU encoders still need an explicit -pix_fmt yuv420p.
+        use_nvenc = "nvenc" in encoder
+        use_amf   = "amf"   in encoder
+        if use_vaapi:
+            pix_fmt_args = ["-pix_fmt", "nv12"]
+        elif use_nvenc or use_amf:
+            # NVENC and AMF: format is already set by filter_complex; no extra flag.
+            # Passing -pix_fmt after -c:v h264_nvenc causes "Operation not permitted"
+            # on Linux and AMF init failure on Windows.
+            pix_fmt_args = []
+        else:
+            # QSV and any other HW encoder: explicit yuv420p is safe and expected
+            pix_fmt_args = ["-pix_fmt", "yuv420p"]
     else:
         encoder      = config.codec
         enc_label    = f"CPU ({encoder})"
@@ -412,6 +439,22 @@ def process_video(
         width, height, fps, duration,
         encoder, enc_label, quality_args, preset_args, pix_fmt_args,
         progress_callback)
+
+
+# ── Upscale target → filter string ───────────────────────────────────────────
+_UPSCALE_HEIGHTS = {"1440p": 1440, "2.7k": 1512, "4k": 2160}
+
+def _upscale_filter(target: str, fc_fmt, use_vaapi: bool) -> str:
+    """Build the filter_complex string for overlay + optional upscale."""
+    h = _UPSCALE_HEIGHTS.get((target or "").lower())
+    if use_vaapi:
+        # VAAPI: no format= node, hwupload instead
+        if h:
+            return f"[0:v][1:v]overlay=shortest=1,scale=-2:{h}:flags=lanczos,hwupload[v]"
+        return "[0:v][1:v]overlay=shortest=1,hwupload[v]"
+    if h:
+        return f"[0:v][1:v]overlay=shortest=1,scale=-2:{h}:flags=lanczos,format={fc_fmt}[v]"
+    return f"[0:v][1:v]overlay=shortest=1,format={fc_fmt}[v]"
 
 
 # ── Fast pipeline: OSD overlay ─────────────────────────────────────────────────
@@ -471,6 +514,20 @@ def _overlay_pipeline(
     # faststart moves moov atom to front for instant web playback
     movflags = ["-movflags", "+faststart"] if not use_vaapi else []
 
+    # Pixel format for the filter_complex output — must match what the encoder accepts:
+    #   NVENC (NVIDIA) → nv12  (its native format; yuv420p causes "Operation not permitted" on Linux)
+    #   AMF   (AMD)    → nv12  (yuv420p causes init failure on Windows)
+    #   VAAPI          → handled separately with hwupload (no format= node)
+    #   CPU / QSV      → yuv420p
+    use_nvenc = "nvenc" in encoder
+    use_amf   = "amf"   in encoder
+    if use_vaapi:
+        _fc_fmt = None   # VAAPI path uses hwupload, no format= node needed
+    elif use_nvenc or use_amf:
+        _fc_fmt = "nv12"
+    else:
+        _fc_fmt = "yuv420p"
+
     ffmpeg_cmd = (
         [ffmpeg, "-y"]
         + (["-vaapi_device", "/dev/dri/renderD128"] if use_vaapi else [])
@@ -481,15 +538,11 @@ def _overlay_pipeline(
            "-s", f"{width}x{height}",
            "-r", str(fps),
            "-i", "pipe:0"]
-        # High-quality RGBA→YUV420 colour conversion
+        # High-quality RGBA→YUV colour conversion
         + ["-sws_flags", "lanczos+accurate_rnd+full_chroma_int"]
-        # Overlay filter: OSD on top of source, optional 1440p upscale, then encode
+        # Overlay filter: OSD on top of source, optional upscale, then encode
         + ["-filter_complex",
-           ("[0:v][1:v]overlay=shortest=1,scale=-2:1440:flags=lanczos,format=yuv420p[v]"
-            if config.upscale_1440p and not use_vaapi else
-            "[0:v][1:v]overlay=shortest=1,format=yuv420p[v]"
-            if not use_vaapi else
-            "[0:v][1:v]overlay=shortest=1,hwupload[v]")]
+           (_upscale_filter(config.upscale_target, _fc_fmt, use_vaapi))]
         + ["-map", "[v]",
            "-map", "0:a:0?",
            "-c:v", encoder]
@@ -557,8 +610,14 @@ def _overlay_pipeline(
                     progress_callback(pct,
                         f"Frame {i+1}/{n_out_frames}  ({abs_t_ms/1000:.1f}s)  [{enc_label}]")
 
-    except BrokenPipeError:
-        pass
+    except (BrokenPipeError, OSError) as exc:
+            # BrokenPipeError  — POSIX broken pipe (errno 32)
+            # OSError(errno=22) — Windows EINVAL raised when writing to a pipe
+            #                     whose read end (FFmpeg) has already closed.
+            # Both mean FFmpeg exited early — fall through to returncode check.
+            import errno as _errno
+            if not isinstance(exc, BrokenPipeError) and getattr(exc, 'errno', None) != _errno.EINVAL:
+                raise   # genuine unexpected OS error — re-raise
     finally:
         try:
             ffmpeg_proc.stdin.close()
@@ -574,10 +633,13 @@ def _overlay_pipeline(
     if ffmpeg_proc.returncode not in (0, None):
         err = ffmpeg_stderr[0]
         if hw_info and config.use_hw:
-            if any(x in err.lower() for x in ["nvenc", "vaapi", "qsv", "cuda", "no capable"]):
+            # Widen the GPU-failure check to include AMF and generic HW terms
+            hw_phrases = ["nvenc", "amf", "vaapi", "qsv", "cuda",
+                          "no capable", "no device", "hwaccel", "d3d11"]
+            if any(x in err.lower() for x in hw_phrases):
                 raise RuntimeError(
-                    f"GPU encode failed ({hw_info['name']}):\n{err[-500:]}\n\n"
-                    "Try disabling GPU acceleration.")
+                    f"GPU encode failed ({hw_info['name']}):\n{err[-800:]}\n\n"
+                    "Try disabling GPU acceleration in Settings.")
         raise RuntimeError(f"Encode failed (exit {ffmpeg_proc.returncode}):\n{err[-2000:]}")
 
     if progress_callback:
