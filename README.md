@@ -1,6 +1,6 @@
 # OnyxFPV OSD Tool
 
-Overlay MSP-OSD data onto FPV DVR video footage. Supports Betaflight and INAV.
+Overlay MSP-OSD data onto FPV DVR video footage. Supports Betaflight, INAV and Ardupilot
 
 Reads `.osd` and `.srt` files recorded alongside your DVR video and renders the
 HUD elements directly onto the footage — frame-accurate, GPU-accelerated.
