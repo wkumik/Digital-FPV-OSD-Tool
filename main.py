@@ -76,7 +76,7 @@ _DARK_THEME = True   # module-level flag; toggled by the theme button
 
 # ─── Version & UI scale ───────────────────────────────────────────────────────
 
-VERSION = "1.0.0"
+VERSION = "1.1"
 
 _UI_SCALE = 1.0
 _SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -85,12 +85,15 @@ def _fs(n: int) -> int:
     """Scale a font size by the active UI scale factor."""
     return max(6, int(n * _UI_SCALE))
 
+_OSD_OFFSET_MS = 0  # persisted OSD sync offset (ms)
+
 def _load_settings():
-    global _UI_SCALE
+    global _UI_SCALE, _OSD_OFFSET_MS
     try:
         with open(_SETTINGS_FILE) as f:
             data = json.load(f)
-        _UI_SCALE = float(data.get("ui_scale", 1.0))
+        _UI_SCALE      = float(data.get("ui_scale", 1.0))
+        _OSD_OFFSET_MS = int(data.get("osd_offset_ms", 0))
     except Exception:
         pass
 
@@ -102,7 +105,8 @@ def _save_settings():
                 data = json.load(f)
         except Exception:
             pass
-        data["ui_scale"] = _UI_SCALE
+        data["ui_scale"]      = _UI_SCALE
+        data["osd_offset_ms"] = _OSD_OFFSET_MS
         with open(_SETTINGS_FILE, "w") as f:
             json.dump(data, f, indent=2)
     except Exception:
@@ -214,13 +218,13 @@ _build_styles()
 def _icons_dir():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
 
-def _icon(name: str, size: int = 22) -> QIcon:
-    """Load an icon tinted to the active theme's icon colour."""
+def _icon(name: str, size: int = 22, color: str = None) -> QIcon:
+    """Load an icon tinted to the active theme's icon colour (or an explicit hex colour)."""
     import numpy as np
     path = os.path.join(_icons_dir(), name)
     if not os.path.exists(path):
         return QIcon()
-    col = QColor(_T()["icon"])
+    col = QColor(color if color else _T()["icon"])
     cr, cg, cb = col.red(), col.green(), col.blue()
     # Load via PIL for fast numpy recolouring — much faster than per-pixel QImage loop
     try:
@@ -277,11 +281,14 @@ class VideoInfoWorker(QThread):
 # ─── Widgets ──────────────────────────────────────────────────────────────────
 
 class FileRow(QWidget):
-    def __init__(self, label, placeholder, filter_str, save_mode=False, icon=None, parent=None):
+    def __init__(self, label, placeholder, filter_str, save_mode=False, icon=None,
+                 icon_name="", parent=None):
         super().__init__(parent)
         self.filter_str = filter_str
         self.save_mode  = save_mode
         self._path      = ""
+        self._icon_name = icon_name   # stored for theme retinting
+        self._icon_lbl: Optional[QLabel] = None
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -296,6 +303,7 @@ class FileRow(QWidget):
             icon_lbl.setPixmap(icon.pixmap(16, 16))
             icon_lbl.setFixedSize(16, 16)
             lbl_row.addWidget(icon_lbl)
+            self._icon_lbl = icon_lbl
         lbl = QLabel(label)
         lbl.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
         lbl.setStyleSheet(f"color:{_T()['subtext']}")
@@ -351,6 +359,11 @@ class FileRow(QWidget):
             self.path_lbl.setStyleSheet(PATH_EMPTY)
             self.path_lbl.setToolTip("")
             self.clr.setVisible(False)
+
+    def retint(self):
+        """Re-tint the row icon to the current theme's icon colour."""
+        if self._icon_lbl and self._icon_name:
+            self._icon_lbl.setPixmap(_icon(self._icon_name, 16).pixmap(16, 16))
 
     @property
     def path(self):
@@ -793,6 +806,18 @@ class MainWindow(QMainWindow):
         h1.setStyleSheet(f"color:{_T()['text']};")
         self._h1 = h1
 
+        h2 = QLabel("Digital FPV OSD Tool")
+        h2.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        h2.setStyleSheet(f"color:{_T()['text']};")
+        h2.setAlignment(Qt.AlignmentFlag.AlignBottom)
+        self._h2 = h2
+
+        ver = QLabel(f"v{VERSION}")
+        ver.setFont(QFont("Segoe UI", _fs(8)))
+        ver.setStyleSheet(f"color:{_T()['muted']};")
+        ver.setAlignment(Qt.AlignmentFlag.AlignBottom)
+        self._ver_lbl = ver
+
         self._theme_btn = QPushButton()
         self._theme_btn.setFixedSize(30, 30)
         self._theme_btn.setToolTip("Toggle light / dark theme")
@@ -816,15 +841,12 @@ class MainWindow(QMainWindow):
         self._theme_editor_dlg = None   # lazily created
 
         hdr_row.addWidget(h1)
+        hdr_row.addWidget(h2)
+        hdr_row.addWidget(ver)
         hdr_row.addStretch()
         hdr_row.addWidget(self._palette_btn)
         hdr_row.addWidget(self._theme_btn)
         ll.addLayout(hdr_row)
-
-        h2 = QLabel("Digital FPV OSD Tool")
-        h2.setStyleSheet(f"color:{_T()['muted']};font-size:{_fs(10)}px;margin-bottom:2px;")
-        self._h2 = h2
-        ll.addWidget(h2)
 
         # ── UI Scale selector ─────────────────────────────────────────────────
         scale_row = QHBoxLayout()
@@ -854,11 +876,11 @@ class MainWindow(QMainWindow):
         fgl.setContentsMargins(10, 16, 10, 10)
 
         self.video_row = FileRow("Video",  "Select video…",  "Video (*.mp4 *.mkv *.avi *.mov)",
-                                 icon=_icon("video.png", 16))
+                                 icon=_icon("video.png", 16), icon_name="video.png")
         self.osd_row   = FileRow("OSD",    "Auto-detected",  "OSD (*.osd)",
-                                 icon=_icon("gear.png",  16))
+                                 icon=_icon("gear.png",  16), icon_name="gear.png")
         self.srt_row   = FileRow("SRT",    "Auto-detected",  "SRT (*.srt)",
-                                 icon=_icon("wifi.png",  16))
+                                 icon=_icon("wifi.png",  16), icon_name="wifi.png")
         self.video_row.btn.clicked.disconnect()
         self.video_row.btn.clicked.connect(self._on_video)
         self.osd_row.btn.clicked.disconnect()
@@ -964,10 +986,10 @@ class MainWindow(QMainWindow):
         cl.setContentsMargins(10, 16, 10, 12)
         cl.setSpacing(8)
 
-        prev_lbl = QLabel("Preview")
-        prev_lbl.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-        prev_lbl.setStyleSheet(f"color:{_T()['text']}")
-        cl.addWidget(prev_lbl)
+        self._prev_lbl = QLabel("Preview")
+        self._prev_lbl.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        self._prev_lbl.setStyleSheet(f"color:{_T()['subtext']}")
+        cl.addWidget(self._prev_lbl)
 
         self.preview = PreviewPanel()
         self._preview_panel = self.preview   # saved for theme reapply
@@ -1088,6 +1110,38 @@ class MainWindow(QMainWindow):
             sl.valueChanged.connect(self._queue_preview)
             posgl.addWidget(sl)
 
+        # OSD sync offset row
+        sync_row = QHBoxLayout()
+        sync_row.setSpacing(4)
+        self._sync_lbl = QLabel("OSD offset:")
+        self._sync_lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:{_fs(11)}px;")
+        self._sync_lbl.setFixedWidth(72)
+        self.osd_offset_sb = QSpinBox()
+        self.osd_offset_sb.setRange(-10000, 10000)
+        self.osd_offset_sb.setValue(_OSD_OFFSET_MS)
+        self.osd_offset_sb.setSuffix(" ms")
+        self.osd_offset_sb.setToolTip(
+            "Shift OSD timestamps relative to video.\n"
+            "+500 ms → OSD shows data 500 ms later (compensates OSD lagging behind).\n"
+            "−500 ms → OSD shows data 500 ms earlier.")
+        self.osd_offset_sb.setStyleSheet(
+            f"QSpinBox{{background:{_T()['surface']};color:{_T()['text']};"
+            f"border:1px solid {_T()['border2']};border-radius:4px;padding:3px 6px;}}"
+            f"QSpinBox::up-button,QSpinBox::down-button{{width:16px;"
+            f"background:{_T()['surface2']};border-radius:2px;}}"
+        )
+        self.osd_offset_sb.valueChanged.connect(self._on_osd_offset_changed)
+        self._rst_offset_btn = QPushButton("↺")
+        self._rst_offset_btn.setFixedWidth(28)
+        self._rst_offset_btn.setFixedHeight(24)
+        self._rst_offset_btn.setStyleSheet(BTN_SEC)
+        self._rst_offset_btn.setToolTip("Reset OSD offset to 0")
+        self._rst_offset_btn.clicked.connect(lambda: self.osd_offset_sb.setValue(0))
+        sync_row.addWidget(self._sync_lbl)
+        sync_row.addWidget(self.osd_offset_sb, 1)
+        sync_row.addWidget(self._rst_offset_btn)
+        posgl.addLayout(sync_row)
+
         self._rst_pos_btn = QPushButton("↺  Reset")
         self._rst_pos_btn.setStyleSheet(BTN_SEC)
         self._rst_pos_btn.setFixedHeight(26)
@@ -1119,17 +1173,17 @@ class MainWindow(QMainWindow):
         rl.setContentsMargins(10, 16, 14, 16)
         rl.setSpacing(10)
 
-        out_hdr = QLabel("Output & Encoding")
-        out_hdr.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-        out_hdr.setStyleSheet(f"color:{_T()['text']}")
-        rl.addWidget(out_hdr)
+        self._out_hdr = QLabel("Output & Encoding")
+        self._out_hdr.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        self._out_hdr.setStyleSheet(f"color:{_T()['subtext']}")
+        rl.addWidget(self._out_hdr)
 
         # Output file
         out_fg = QGroupBox("Output File")
         out_fg.setStyleSheet(GROUP_STYLE)
         out_fgl = QVBoxLayout(out_fg)
         out_fgl.setContentsMargins(10, 16, 10, 10)
-        self.out_row = FileRow("Output", "Choose output path…", "", save_mode=True, icon=_icon("save.png", 16))
+        self.out_row = FileRow("Output", "Choose output path…", "", save_mode=True, icon=_icon("save.png", 16), icon_name="save.png")
         out_fgl.addWidget(self.out_row)
         rl.addWidget(out_fg)
 
@@ -1528,8 +1582,13 @@ class MainWindow(QMainWindow):
         )
         self._h1.setFont(QFont("Segoe UI", _fs(16), QFont.Weight.Bold))
         self._h1.setStyleSheet(f"color:{t['text']};")
-        self._h2.setStyleSheet(f"color:{t['muted']};font-size:{_fs(10)}px;margin-bottom:2px;")
+        self._ver_lbl.setFont(QFont("Segoe UI", _fs(8)))
+        self._ver_lbl.setStyleSheet(f"color:{t['muted']};")
+        self._h2.setFont(QFont("Segoe UI", _fs(16), QFont.Weight.Bold))
+        self._h2.setStyleSheet(f"color:{t['text']};")
         self._scale_lbl.setStyleSheet(f"color:{t['muted']};font-size:{_fs(10)}px;")
+        self._prev_lbl.setStyleSheet(f"color:{t['subtext']};")
+        self._out_hdr.setStyleSheet(f"color:{t['subtext']};")
 
         self._left_scroll.setStyleSheet(
             f"QScrollArea{{border:none;background:transparent;}}"
@@ -1562,26 +1621,40 @@ class MainWindow(QMainWindow):
         if self._preview_panel._pil_img is None:
             self._preview_panel._redraw_placeholder()
 
-        # Buttons
+        # Buttons + icon retint
         self.render_btn.setStyleSheet(BTN_PRIMARY)
         self.stop_btn.setStyleSheet(BTN_STOP)
         self.restart_btn.setStyleSheet(BTN_PLAY)
         self.play_btn.setStyleSheet(BTN_PLAY)
+        # Render has a coloured (accent) bg → white icon; stop has red bg → white icon
+        _render_ico_col = "#ffffff" if not _DARK_THEME else t['bg']
+        self.render_btn.setIcon(_icon("render.png", 20, _render_ico_col))
+        self.stop_btn.setIcon(_icon("stop.png", 20, "#ffffff"))
+        # Play/restart sit on a neutral surface → use the theme icon colour
+        self.restart_btn.setIcon(_icon("rewind.png", 20))
+        _play_name = "pause.png" if self._playing else "play.png"
+        self.play_btn.setIcon(_icon(_play_name, 22))
+        # File row icons
+        for row in [self.video_row, self.osd_row, self.srt_row, self.out_row]:
+            row.retint()
         self._custom_btn.setStyleSheet(BTN_SEC)
         self._ref_btn.setStyleSheet(BTN_SEC)
         self._rst_pos_btn.setStyleSheet(BTN_SEC)
+        self._rst_offset_btn.setStyleSheet(BTN_SEC)
         self._trim_rst_btn.setStyleSheet(BTN_SEC)
         self.mode_crf_btn.setStyleSheet(BTN_SEC)
         self.mode_mbps_btn.setStyleSheet(BTN_SEC)
         self.trim_sel.update()
 
-        # SpinBox
-        self.mbps_spin.setStyleSheet(
+        # SpinBoxes
+        _sb_style = (
             f"QSpinBox{{background:{t['surface']};color:{t['text']};"
             f"border:1px solid {t['border2']};border-radius:4px;padding:3px 6px;}}"
             f"QSpinBox::up-button,QSpinBox::down-button{{width:16px;"
             f"background:{t['surface2']};border-radius:2px;}}"
         )
+        self.mbps_spin.setStyleSheet(_sb_style)
+        self.osd_offset_sb.setStyleSheet(_sb_style)
 
         # Progress bar — repaint with new theme colours
         self.prog.update()
@@ -1593,6 +1666,7 @@ class MainWindow(QMainWindow):
             (self.status,      f"color:{t['muted']};font-size:{_fs(10)}px;"),
             (self.frame_lbl,   f"color:{t['text']};font-size:{_fs(11)}px;font-weight:bold;"),
             (self.osd_warn,    f"color:{t['orange']};font-size:{_fs(10)}px;"),
+            (self._sync_lbl,   f"color:{t['subtext']};font-size:{_fs(11)}px;"),
         ]:
             lbl.setStyleSheet(style)
 
@@ -1810,7 +1884,7 @@ class MainWindow(QMainWindow):
     def _on_frame_sl(self, pct):
         # Update text labels immediately for responsiveness
         self.frame_lbl.setText(f"{pct}%")
-        t_ms = self._video_time_ms(pct)
+        t_ms = self._video_time_ms(pct) + self.osd_offset_sb.value()
         osd_info = "—"
         if self.osd_data:
             fr = self.osd_data.frame_at_time(t_ms)
@@ -1891,7 +1965,7 @@ class MainWindow(QMainWindow):
         if img: self.preview.show_frame(self._composite(img, pct))
 
     def _composite(self, img, pct):
-        t_ms = self._video_time_ms(pct)
+        t_ms     = self._video_time_ms(pct) + self.osd_offset_sb.value()
         osd_frame = self.osd_data.frame_at_time(t_ms) if self.osd_data else None
         srt_text = ""
         if self.srt_data and self.srt_bar_check.isChecked():
@@ -1908,6 +1982,12 @@ class MainWindow(QMainWindow):
         if self.font_obj and PIL_OK:
             return render_osd_frame(img, osd_frame, self.font_obj, cfg)
         return render_fallback(img, osd_frame, cfg)
+
+    def _on_osd_offset_changed(self, value: int):
+        global _OSD_OFFSET_MS
+        _OSD_OFFSET_MS = value
+        _save_settings()
+        self._queue_preview()
 
     def _reset_pos(self):
         self.sl_x.setValue(0)
@@ -2233,6 +2313,7 @@ class MainWindow(QMainWindow):
             trim_start    = self.trim_sel.in_pct  * self.video_dur,
             trim_end      = self.trim_sel.out_pct * self.video_dur,
             upscale_target = upscale_target,
+            osd_offset_ms = self.osd_offset_sb.value(),
         )
 
         self.render_btn.setEnabled(False)

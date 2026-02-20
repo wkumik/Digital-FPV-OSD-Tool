@@ -1,6 +1,27 @@
-# GitHub Release — Step by Step
+# Release Notes
 
-## 1. Create the repository
+---
+
+## v1.1 — 2026-02-20
+
+### New
+- BetaFPV P1 embedded OSD support
+- Caddx Ascent OSD support
+- Light theme with in-app custom colour editor
+- UI scaling (100% / 125% / 150% / 175%)
+- Version number displayed in the app header
+
+### Changed
+- App rebranded to **VueOSD**
+- Cleaned up unused files (`OnyxFPV OSD Tool.bat`, `nul`, `splash.png`)
+
+---
+
+## v1.0.0 — Initial Release
+
+### GitHub Release — Step by Step
+
+#### 1. Create the repository
 
 1. Go to https://github.com/new
 2. **Repository name:** `Digital-FPV-OSD-Tool`
@@ -12,7 +33,7 @@
 
 ---
 
-## 2. Prepare your local folder
+#### 2. Prepare your local folder
 
 Open a terminal (cmd or PowerShell) in the `Digital-FPV-OSD-Tool` folder:
 
@@ -25,7 +46,7 @@ git commit -m "Initial release v1.0.0"
 
 ---
 
-## 3. Push to GitHub
+#### 3. Push to GitHub
 
 Replace `YOUR_USERNAME` with your GitHub username:
 
@@ -41,7 +62,7 @@ Generate one at: https://github.com/settings/tokens/new
 
 ---
 
-## 4. Create the v1.0.0 release
+#### 4. Create the v1.0.0 release
 
 ```bat
 git tag v1.0.0
@@ -58,7 +79,7 @@ Then on GitHub:
 
 ---
 
-## 5. Recommended .gitignore
+#### 5. Recommended .gitignore
 
 Create a file called `.gitignore` with:
 
@@ -83,7 +104,7 @@ git push
 
 ---
 
-## 6. Update CREDITS.md
+#### 6. Update CREDITS.md
 
 Before publishing, update `CREDITS.md`:
 - Set your actual GitHub URL in place of `https://github.com/wkumik`
@@ -91,6 +112,6 @@ Before publishing, update `CREDITS.md`:
 
 ---
 
-## 7. After publishing — update the README badge URLs
+#### 7. After publishing — update the README badge URLs
 
 In `README.md`, update any `github.com/wkumik` links as needed.

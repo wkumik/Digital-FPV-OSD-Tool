@@ -85,6 +85,7 @@ class ProcessingConfig:
     trim_end:      float = 0.0    # seconds, 0 = end of file
     upscale_target: str  = ""     # "" = no upscale | "1440p" | "2.7k" | "4k"
     osd_data:      object = None  # pre-parsed OsdFile (e.g. P1 embedded OSD)
+    osd_offset_ms: int   = 0     # Manual OSD sync offset (ms); positive = OSD forward
 
 
 # ── GPU encoder detection ─────────────────────────────────────────────────────
@@ -274,6 +275,39 @@ def get_video_info(video_path: str) -> dict:
         return info
     except Exception as e:
         return {"error": str(e)}
+
+
+def get_frame_pts(video_path: str, trim_start: float = 0.0) -> list:
+    """Return per-frame PTS list (seconds relative to trim_start) via ffprobe.
+
+    Reads only frame metadata — runs at ~5,000–20,000 fps (< 2 s for a 1 h video).
+    Returns an empty list on any error; caller must fall back to i/fps in that case.
+    """
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        ff = find_ffmpeg()
+        if ff:
+            candidate = ff.replace("ffmpeg", "ffprobe")
+            if os.path.exists(candidate):
+                ffprobe = candidate
+    if not ffprobe:
+        return []
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
+           "-show_entries", "frame=best_effort_timestamp_time",
+           "-of", "csv=p=0", video_path]
+    try:
+        result = _hidden_run(cmd, capture_output=True, text=True, timeout=60)
+        pts = []
+        for line in result.stdout.splitlines():
+            try:
+                t = float(line.strip())
+                if t >= trim_start:
+                    pts.append(t - trim_start)
+            except ValueError:
+                pass
+        return pts
+    except Exception:
+        return []
 
 
 _STDERR_CAP = 32 * 1024   # keep last 32 KB of ffmpeg stderr
@@ -508,6 +542,26 @@ def _overlay_pipeline(
     if progress_callback:
         progress_callback(5, f"{width}x{height} @ {fps}fps · {n_out_frames} frames · {enc_label}")
 
+    # ── PTS extraction (fast metadata-only ffprobe) ───────────────────────────
+    # Fetch actual presentation timestamps so OSD stays locked after video gaps
+    # (dropped packets → frozen frames in CFR output → i/fps drifts away).
+    pts_list = get_frame_pts(config.input_video, _t_start)
+    use_pts  = len(pts_list) >= n_out_frames
+
+    if use_pts:
+        # Check for gaps: any consecutive PTS jump > 2.5 × normal frame interval
+        _frame_interval = 1.0 / fps
+        _has_gaps = any(
+            pts_list[j] - pts_list[j - 1] > 2.5 * _frame_interval
+            for j in range(1, min(len(pts_list), n_out_frames))
+        )
+        if _has_gaps and progress_callback:
+            progress_callback(5, "⚠ Video gaps detected — using PTS-accurate OSD sync")
+    else:
+        if pts_list and progress_callback:
+            # Got some PTSs but not enough — unusual; fall back gracefully
+            progress_callback(5, "⚠ PTS list shorter than frame count — falling back to i/fps")
+
     # OSD pipe runs at the SAME fps as the video.
     # Each pipe frame is looked up by its absolute timestamp so OSD timing is exact
     # regardless of the OSD file's variable internal frame rate.
@@ -584,8 +638,11 @@ def _overlay_pipeline(
                 progress_callback(50, f"No OSD in trim window — blank overlay  [{enc_label}]")
         else:
             for i in range(n_out_frames):
-                # Absolute timestamp of this video frame in the OSD file's timebase
-                abs_t_ms = int((_t_start + i / fps) * 1000)
+                # Absolute timestamp of this video frame in the OSD file's timebase.
+                # use_pts: real PTS from ffprobe (handles gaps/dropped packets).
+                # Fallback: i/fps (constant-rate assumption, current legacy behaviour).
+                t_sec    = pts_list[i] if use_pts else i / fps
+                abs_t_ms = int((_t_start + t_sec) * 1000 + config.osd_offset_ms)
 
                 osd_frame = osd_data.frame_at_time(abs_t_ms)
 

@@ -35,12 +35,13 @@ from font_loader import OsdFont
 
 @dataclass
 class OsdRenderConfig:
-    offset_x:     int   = 0
-    offset_y:     int   = 0
-    scale:        float = 1.0
-    show_srt_bar: bool  = True
-    srt_text:     str   = ""
-    srt_opacity:  float = 0.6   # SRT bar background opacity (0.0–1.0)
+    offset_x:      int   = 0
+    offset_y:      int   = 0
+    scale:         float = 1.0
+    show_srt_bar:  bool  = True
+    srt_text:      str   = ""
+    srt_opacity:   float = 0.6   # SRT bar background opacity (0.0–1.0)
+    osd_offset_ms: int   = 0     # Manual sync offset (ms); applied to timestamp lookups
 
 
 def _auto_scale(video_w: int, video_h: int, tile_w: int, tile_h: int,
@@ -119,21 +120,29 @@ def render_fallback(
 
 
 def _draw_srt_bar(img: "Image.Image", text: str, opacity: float = 0.6, _cache: dict = {}):
-    """Draw SRT status bar onto a PIL image. Font is cached across calls."""
-    draw  = ImageDraw.Draw(img)
+    """Draw SRT status bar onto a PIL image. Font is cached across calls.
+
+    Draws on a separate transparent overlay then alpha_composites onto img so
+    the output pixels are always fully opaque (alpha=255).  This prevents the
+    UI theme background from bleeding through in the preview widget.
+    """
     fsize = max(14, img.height // 42)
     if fsize not in _cache:
         try:    _cache[fsize] = PILFont.truetype("arial.ttf", fsize)
         except: _cache[fsize] = PILFont.load_default()
     fnt = _cache[fsize]
+
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw    = ImageDraw.Draw(overlay)
     bb  = draw.textbbox((0, 0), text, font=fnt)
     tw  = bb[2] - bb[0];  th = bb[3] - bb[1]
     pad = 6;  margin = 10
-    x   = (img.width - tw) // 2
+    x   = (img.width  - tw) // 2
     y   = img.height - th - margin
     draw.rounded_rectangle([x-pad, y-pad, x+tw+pad, y+th+pad],
                             radius=4, fill=(0, 0, 0, int(opacity * 255)))
-    draw.text((x,   y  ), text, font=fnt, fill=(255, 255, 255, 255))
+    draw.text((x, y), text, font=fnt, fill=(255, 255, 255, 255))
+    img.alpha_composite(overlay)
 
 
 # ─── Numpy renderer (video export — hot path) ─────────────────────────────────
