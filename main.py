@@ -785,86 +785,107 @@ class PreviewPanel(QLabel):
         super().mousePressEvent(event)
 
     def _redraw_placeholder(self):
-        w, h = max(self.width(), 640), max(self.height(), 360)
+        w = max(self.width(), 1)
+        h = max(self.height(), 1)
         pix = QPixmap(w, h)
         t = _T()
         pix.fill(QColor(t["bg2"]))
         p = QPainter(pix)
 
-        cx, cy = w // 2, h // 2
-        lw = min(w - 80, 500)
+        cx = w // 2
+        lw = min(w - 40, 500)
         lx = cx - lw // 2
 
-        # Title
+        # ── Measure content blocks ─────────────────────────────────────────
+        TITLE_H   = 28
+        SEP_ABOVE = 5    # title-bottom → separator
+        STEP_BELOW= 13   # separator → first step
+        STEP_H    = 22
+        STEP_PITCH= 24
+        N_STEPS   = 4
+        qs_h = TITLE_H + SEP_ABOVE + 1 + STEP_BELOW + (N_STEPS - 1) * STEP_PITCH + STEP_H
+
+        px = 3
+        heart_w = 13 * px   # 39
+        heart_h = 11 * px   # 33
+        don_h   = heart_h + 4 + 16 + 8 + 16   # 77
+
+        PAD      = 12
+        GAP      = 24   # space between QS block and donation block
+        show_don = h >= PAD + qs_h + GAP + don_h + PAD
+
+        total_h = qs_h + (GAP + don_h if show_don else 0)
+        top     = max(PAD, (h - total_h) // 2)
+
+        # ── Quick Start ────────────────────────────────────────────────────
+        title_y = top
         p.setPen(QPen(QColor(t["subtext"])))
         p.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
-        p.drawText(QRect(lx, cy - 88, lw, 28), Qt.AlignmentFlag.AlignCenter, "Quick Start")
+        p.drawText(QRect(lx, title_y, lw, TITLE_H),
+                   Qt.AlignmentFlag.AlignCenter, "Quick Start")
 
-        # Separator
+        sep_y = title_y + TITLE_H + SEP_ABOVE
         p.setPen(QPen(QColor(t["border2"])))
-        p.drawLine(lx, cy - 55, lx + lw, cy - 55)
+        p.drawLine(lx, sep_y, lx + lw, sep_y)
 
-        # Steps
-        p.setPen(QPen(QColor(t["muted"])))
-        p.setFont(QFont("Segoe UI", 10))
+        step0_y = sep_y + 1 + STEP_BELOW
         steps = [
             "①  Drop a video, .osd or .srt onto the drop zone — companions auto-load",
             "②  Pick a font style in the left panel",
             "③  Adjust position, opacity and scale; configure the SRT bar",
             "④  Set the output file path, then click  Render",
         ]
-        for i, line in enumerate(steps):
-            p.drawText(QRect(lx, cy - 42 + i * 24, lw, 22), Qt.AlignmentFlag.AlignLeft, line)
-
-        # ── Donation section ──────────────────────────────────────────────────
-        # 13×11 pixel-art heart  (K=black, R=red, W=white highlight, 0=skip)
-        # Modelled on classic 8-bit game heart: two bumps → merged body → staircase tip
-        HEART = [
-            "00KKK00KKK000",   # row  0 – tops of two bumps
-            "0KRRRK0KRRRK0",   # row  1 – bump fills
-            "KRWWRRRRRRRRK",   # row  2 – bumps merge; 2×2 white highlight begins
-            "KRWWRRRRRRRRK",   # row  3 – white highlight row 2
-            "KRRRRRRRRRRRK",   # row  4 – full-width body
-            "0KRRRRRRRRRK0",   # row  5 – staircase step 1
-            "00KRRRRRRRK00",   # row  6 – staircase step 2
-            "000KRRRRRK000",   # row  7 – staircase step 3
-            "0000KRRRK0000",   # row  8 – staircase step 4
-            "00000KRK00000",   # row  9 – staircase step 5
-            "000000K000000",   # row 10 – single-pixel tip
-        ]
-        px = 3
-        heart_w = len(HEART[0]) * px   # 39
-        heart_h = len(HEART) * px      # 33
-        heart_x = cx - heart_w // 2
-        heart_y = h - 100
-        _hcol = {"K": QColor("#000000"), "R": QColor("#e60020"), "W": QColor("#ffffff")}
-        p.setPen(Qt.PenStyle.NoPen)
-        for ri, row in enumerate(HEART):
-            for ci, ch in enumerate(row):
-                col = _hcol.get(ch)
-                if col:
-                    p.setBrush(col)
-                    p.drawRect(heart_x + ci * px, heart_y + ri * px, px, px)
-
-        # Witty note
         p.setPen(QPen(QColor(t["muted"])))
-        p.setFont(QFont("Segoe UI", 9))
-        p.drawText(QRect(lx, heart_y + heart_h + 4, lw, 16),
-                   Qt.AlignmentFlag.AlignCenter, _DONATE_NOTE)
+        p.setFont(QFont("Segoe UI", 10))
+        for i, line in enumerate(steps):
+            p.drawText(QRect(lx, step0_y + i * STEP_PITCH, lw, STEP_H),
+                       Qt.AlignmentFlag.AlignLeft, line)
 
-        # Donation link hint
-        p.setPen(QPen(QColor(t["accent"])))
-        p.setFont(QFont("Segoe UI", 9))
-        p.drawText(QRect(lx, heart_y + heart_h + 24, lw, 16),
-                   Qt.AlignmentFlag.AlignCenter, "buymeacoffee.com/failsavefpv  \u2197")
+        # ── Donation section (hidden when widget is too short) ─────────────
+        if show_don:
+            HEART = [
+                "00KKK00KKK000",   # row  0 – tops of two bumps
+                "0KRRRK0KRRRK0",   # row  1 – bump fills
+                "KRWWRRRRRRRRK",   # row  2 – bumps merge; 2×2 white highlight begins
+                "KRWWRRRRRRRRK",   # row  3 – white highlight row 2
+                "KRRRRRRRRRRRK",   # row  4 – full-width body
+                "0KRRRRRRRRRK0",   # row  5 – staircase step 1
+                "00KRRRRRRRK00",   # row  6 – staircase step 2
+                "000KRRRRRK000",   # row  7 – staircase step 3
+                "0000KRRRK0000",   # row  8 – staircase step 4
+                "00000KRK00000",   # row  9 – staircase step 5
+                "000000K000000",   # row 10 – single-pixel tip
+            ]
+            heart_x = cx - heart_w // 2
+            heart_y = top + qs_h + GAP
+            _hcol = {"K": QColor("#000000"), "R": QColor("#e60020"), "W": QColor("#ffffff")}
+            p.setPen(Qt.PenStyle.NoPen)
+            for ri, row in enumerate(HEART):
+                for ci, ch in enumerate(row):
+                    col = _hcol.get(ch)
+                    if col:
+                        p.setBrush(col)
+                        p.drawRect(heart_x + ci * px, heart_y + ri * px, px, px)
+
+            p.setPen(QPen(QColor(t["muted"])))
+            p.setFont(QFont("Segoe UI", 9))
+            p.drawText(QRect(lx, heart_y + heart_h + 4, lw, 16),
+                       Qt.AlignmentFlag.AlignCenter, _DONATE_NOTE)
+
+            p.setPen(QPen(QColor(t["accent"])))
+            p.setFont(QFont("Segoe UI", 9))
+            p.drawText(QRect(lx, heart_y + heart_h + 24, lw, 16),
+                       Qt.AlignmentFlag.AlignCenter, "buymeacoffee.com/failsavefpv  \u2197")
+
+            self._donate_rects = [
+                QRect(heart_x, heart_y, heart_w, heart_h),
+                QRect(lx, heart_y + heart_h + 24, lw, 16),
+            ]
+        else:
+            self._donate_rects = []
 
         p.end()
         super().setPixmap(pix)
-        # Store clickable zones for hit-testing in mouse events
-        self._donate_rects = [
-            QRect(heart_x, heart_y, heart_w, heart_h),
-            QRect(lx, heart_y + heart_h + 24, lw, 16),
-        ]
 
     def show_frame(self, img):
         if not PIL_OK:
