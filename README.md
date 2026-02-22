@@ -22,7 +22,7 @@ HUD elements directly onto the footage — frame-accurate, GPU-accelerated.
 - GPU-accelerated encoding (NVIDIA NVENC, AMD AMF, Intel QSV)
 - Trim, scale, offset, opacity controls
 - Live preview with scrubbing
-- Upscale to 1440p
+- Upscale to 1440p, 2.7K or 4K
 - CRF or target bitrate mode
 - Light and dark theme with custom colour editor
 - UI scaling (100% – 175%)
