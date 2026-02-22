@@ -5,7 +5,7 @@ VueOSD — Digital FPV OSD Tool
 Parse and overlay MSP-OSD data onto FPV DVR video footage.
 """
 
-import sys, os, threading, subprocess, tempfile, json
+import sys, os, math, threading, subprocess, tempfile, json, random
 
 # ── Windows: set AppUserModelID so taskbar shows our icon, not Python's ───────
 if sys.platform == "win32":
@@ -25,8 +25,8 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QSplitter, QScrollArea, QSpinBox, QFrame,
     QDialog, QLineEdit,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont, QPixmap, QImage, QPainter, QColor, QPen, QIcon
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect, QUrl
+from PyQt6.QtGui import QFont, QPixmap, QImage, QPainter, QColor, QPen, QIcon, QDesktopServices
 
 
 from srt_parser    import parse_srt, SrtFile
@@ -37,6 +37,23 @@ from font_loader   import (fonts_by_firmware, load_font, load_font_from_file,
 from osd_renderer  import OsdRenderConfig, render_osd_frame, render_fallback
 from video_processor import ProcessingConfig, process_video, get_video_info, find_ffmpeg, detect_hw_encoder
 from splash_screen   import SplashScreen
+
+
+_DONATE_URL = "https://buymeacoffee.com/failsavefpv"
+
+_DONATE_NOTES = [
+    "Runs on coffee & failed maiden flights.",
+    "Every donation funds one more prop replacement.",
+    "This tool is free. My props are not.",
+    "If this saved your footage, maybe save my bank account.",
+    "Claude wrote the code. I flew into a tree to test it.",
+    "100% AI-assisted. 0% AI-responsible for the bugs.",
+    "Built with Claude. Crashed with Betaflight.",
+    "Blackbox says: prop strike at 0:42. Donate anyway.",
+    "The AI did the coding. I did the crashing.",
+    "Claude suggested a paywall. I said no. For now.",
+]
+_DONATE_NOTE = random.choice(_DONATE_NOTES)
 
 
 try:
@@ -370,6 +387,62 @@ class FileRow(QWidget):
         return self._path
 
 
+class DropZone(QFrame):
+    file_dropped = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setMinimumHeight(72)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 8, 8, 8)
+        self._lbl = QLabel("Drop  .mp4 · .osd · .srt  here")
+        self._lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl.setStyleSheet(f"color:{_T()['muted']};font-size:11px;")
+        lay.addWidget(self._lbl)
+        self._update_idle()
+
+    def _update_idle(self):
+        self.setStyleSheet(
+            f"DropZone{{background:{_T()['bg2']};border:2px dashed {_T()['border2']};"
+            f"border-radius:8px;}}"
+        )
+        self._lbl.setStyleSheet(f"color:{_T()['muted']};font-size:11px;")
+
+    def _update_hover(self):
+        self.setStyleSheet(
+            f"DropZone{{background:{_T()['surface']};border:2px solid {_T()['accent']};"
+            f"border-radius:8px;}}"
+        )
+        self._lbl.setStyleSheet(f"color:{_T()['accent']};font-size:11px;font-weight:bold;")
+
+    def refresh_theme(self):
+        self._update_idle()
+
+    _VALID_EXTS = {'.mp4', '.mkv', '.avi', '.mov', '.osd', '.srt'}
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            paths = [u.toLocalFile() for u in event.mimeData().urls()]
+            if any(os.path.splitext(p)[1].lower() in self._VALID_EXTS for p in paths):
+                event.acceptProposedAction()
+                self._update_hover()
+                return
+        event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._update_idle()
+
+    def dropEvent(self, event):
+        self._update_idle()
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path and os.path.splitext(path)[1].lower() in self._VALID_EXTS:
+                self.file_dropped.emit(path)
+                break
+        event.acceptProposedAction()
+
+
 class LabeledSlider(QWidget):
     valueChanged = pyqtSignal(int)
 
@@ -380,9 +453,9 @@ class LabeledSlider(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
 
-        lbl = QLabel(label)
-        lbl.setFixedWidth(58)
-        lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
+        self._lbl = QLabel(label)
+        self._lbl.setFixedWidth(58)
+        self._lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
 
         self.sl = QSlider(Qt.Orientation.Horizontal)
         self.sl.setRange(lo, hi)
@@ -397,12 +470,16 @@ class LabeledSlider(QWidget):
         self.sl.valueChanged.connect(
             lambda v: (self.vl.setText(f"{v}{self._s}"), self.valueChanged.emit(v))
         )
-        lay.addWidget(lbl)
+        lay.addWidget(self._lbl)
         lay.addWidget(self.sl)
         lay.addWidget(self.vl)
 
     def value(self): return self.sl.value()
     def setValue(self, v): self.sl.setValue(v)
+
+    def refresh_theme(self):
+        self._lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
+        self.vl.setStyleSheet(f"color:{_T()['text']};font-size:11px;font-weight:bold;")
 
 
 class InfoCard(QGroupBox):
@@ -430,6 +507,15 @@ class InfoCard(QGroupBox):
             if it.widget():
                 it.widget().deleteLater()
         self._r = 0
+
+    def refresh_theme(self):
+        for row in range(self._r):
+            ki = self._g.itemAtPosition(row, 0)
+            vi = self._g.itemAtPosition(row, 1)
+            if ki and ki.widget():
+                ki.widget().setStyleSheet(f"color:{_T()['muted']};font-size:10px;")
+            if vi and vi.widget():
+                vi.widget().setStyleSheet(f"color:{_T()['text']};font-size:10px;font-weight:600;")
 
 
 class RenderBar(QWidget):
@@ -675,11 +761,28 @@ class PreviewPanel(QLabel):
         self.setStyleSheet(
             f"background:{t['bg2']};border:1px solid {t['border']};border-radius:8px;")
         self._pil_img = None          # always keep full-res PIL source
+        self._donate_rects = []       # clickable zones while placeholder is shown
         self._placeholder()
 
     def _placeholder(self):
         self._pil_img = None
+        self.setMouseTracking(True)
         self._redraw_placeholder()
+
+    def mouseMoveEvent(self, event):
+        if self._pil_img is None:
+            pos = event.position().toPoint()
+            in_zone = any(r.contains(pos) for r in self._donate_rects)
+            self.setCursor(Qt.CursorShape.PointingHandCursor if in_zone
+                           else Qt.CursorShape.ArrowCursor)
+        super().mouseMoveEvent(event)
+
+    def mousePressEvent(self, event):
+        if self._pil_img is None:
+            pos = event.position().toPoint()
+            if any(r.contains(pos) for r in self._donate_rects):
+                QDesktopServices.openUrl(QUrl(_DONATE_URL))
+        super().mousePressEvent(event)
 
     def _redraw_placeholder(self):
         w, h = max(self.width(), 640), max(self.height(), 360)
@@ -687,15 +790,88 @@ class PreviewPanel(QLabel):
         t = _T()
         pix.fill(QColor(t["bg2"]))
         p = QPainter(pix)
-        p.setPen(QPen(QColor(t["surface2"])))
-        p.setFont(QFont("Segoe UI", 13))
-        p.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "🎬  Load a video to see preview")
+
+        cx, cy = w // 2, h // 2
+        lw = min(w - 80, 500)
+        lx = cx - lw // 2
+
+        # Title
+        p.setPen(QPen(QColor(t["subtext"])))
+        p.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        p.drawText(QRect(lx, cy - 88, lw, 28), Qt.AlignmentFlag.AlignCenter, "Quick Start")
+
+        # Separator
+        p.setPen(QPen(QColor(t["border2"])))
+        p.drawLine(lx, cy - 55, lx + lw, cy - 55)
+
+        # Steps
+        p.setPen(QPen(QColor(t["muted"])))
+        p.setFont(QFont("Segoe UI", 10))
+        steps = [
+            "①  Drop a video, .osd or .srt onto the drop zone — companions auto-load",
+            "②  Pick a font style in the left panel",
+            "③  Adjust position, opacity and scale; configure the SRT bar",
+            "④  Set the output file path, then click  Render",
+        ]
+        for i, line in enumerate(steps):
+            p.drawText(QRect(lx, cy - 42 + i * 24, lw, 22), Qt.AlignmentFlag.AlignLeft, line)
+
+        # ── Donation section ──────────────────────────────────────────────────
+        # 13×11 pixel-art heart  (K=black, R=red, W=white highlight, 0=skip)
+        # Modelled on classic 8-bit game heart: two bumps → merged body → staircase tip
+        HEART = [
+            "00KKK00KKK000",   # row  0 – tops of two bumps
+            "0KRRRK0KRRRK0",   # row  1 – bump fills
+            "KRWWRRRRRRRRK",   # row  2 – bumps merge; 2×2 white highlight begins
+            "KRWWRRRRRRRRK",   # row  3 – white highlight row 2
+            "KRRRRRRRRRRRK",   # row  4 – full-width body
+            "0KRRRRRRRRRK0",   # row  5 – staircase step 1
+            "00KRRRRRRRK00",   # row  6 – staircase step 2
+            "000KRRRRRK000",   # row  7 – staircase step 3
+            "0000KRRRK0000",   # row  8 – staircase step 4
+            "00000KRK00000",   # row  9 – staircase step 5
+            "000000K000000",   # row 10 – single-pixel tip
+        ]
+        px = 3
+        heart_w = len(HEART[0]) * px   # 39
+        heart_h = len(HEART) * px      # 33
+        heart_x = cx - heart_w // 2
+        heart_y = h - 100
+        _hcol = {"K": QColor("#000000"), "R": QColor("#e60020"), "W": QColor("#ffffff")}
+        p.setPen(Qt.PenStyle.NoPen)
+        for ri, row in enumerate(HEART):
+            for ci, ch in enumerate(row):
+                col = _hcol.get(ch)
+                if col:
+                    p.setBrush(col)
+                    p.drawRect(heart_x + ci * px, heart_y + ri * px, px, px)
+
+        # Witty note
+        p.setPen(QPen(QColor(t["muted"])))
+        p.setFont(QFont("Segoe UI", 9))
+        p.drawText(QRect(lx, heart_y + heart_h + 4, lw, 16),
+                   Qt.AlignmentFlag.AlignCenter, _DONATE_NOTE)
+
+        # Donation link hint
+        p.setPen(QPen(QColor(t["accent"])))
+        p.setFont(QFont("Segoe UI", 9))
+        p.drawText(QRect(lx, heart_y + heart_h + 24, lw, 16),
+                   Qt.AlignmentFlag.AlignCenter, "buymeacoffee.com/failsavefpv  \u2197")
+
         p.end()
         super().setPixmap(pix)
+        # Store clickable zones for hit-testing in mouse events
+        self._donate_rects = [
+            QRect(heart_x, heart_y, heart_w, heart_h),
+            QRect(lx, heart_y + heart_h + 24, lw, 16),
+        ]
 
     def show_frame(self, img):
         if not PIL_OK:
             return
+        self.setMouseTracking(False)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._donate_rects = []
         self._pil_img = img.convert("RGBA")
         self._repaint()
 
@@ -875,6 +1051,10 @@ class MainWindow(QMainWindow):
         fgl.setSpacing(4)
         fgl.setContentsMargins(10, 16, 10, 10)
 
+        self.drop_zone = DropZone()
+        self.drop_zone.file_dropped.connect(self._on_file_dropped)
+        fgl.addWidget(self.drop_zone)
+
         self.video_row = FileRow("Video",  "Select video…",  "Video (*.mp4 *.mkv *.avi *.mov)",
                                  icon=_icon("video.png", 16), icon_name="video.png")
         self.osd_row   = FileRow("OSD",    "Auto-detected",  "OSD (*.osd)",
@@ -888,14 +1068,9 @@ class MainWindow(QMainWindow):
         self.srt_row.btn.clicked.disconnect()
         self.srt_row.btn.clicked.connect(self._manual_srt)
 
-        note = QLabel("💡 Select any file — .osd and .srt auto-detected by filename")
-        note.setStyleSheet(f"color:{_T()['muted']};font-size:10px;")
-        note.setWordWrap(True)
-
         fgl.addWidget(self.video_row)
         fgl.addWidget(self.osd_row)
         fgl.addWidget(self.srt_row)
-        fgl.addWidget(note)
         ll.addWidget(fg)
 
         # ── OSD Font group ────────────────────────────────────────────────────
@@ -905,28 +1080,16 @@ class MainWindow(QMainWindow):
         fontgl.setSpacing(6)
         fontgl.setContentsMargins(10, 16, 10, 10)
 
-        # Firmware row
-        fw_row = QHBoxLayout()
-        fw_lbl = QLabel("Firmware:")
-        fw_lbl.setFixedWidth(68)
-        fw_lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
-        self.fw_combo = QComboBox()
-        self.fw_combo.setStyleSheet(COMBO_STYLE)
-        self.fw_combo.addItems(list(FIRMWARE_PREFIXES.keys()))
-        self.fw_combo.currentTextChanged.connect(self._on_fw_changed)
-        fw_row.addWidget(fw_lbl)
-        fw_row.addWidget(self.fw_combo, 1)
-        fontgl.addLayout(fw_row)
 
         # Style row
         st_row = QHBoxLayout()
-        st_lbl = QLabel("Style:")
-        st_lbl.setFixedWidth(68)
-        st_lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
+        self._st_lbl = QLabel("Style:")
+        self._st_lbl.setFixedWidth(68)
+        self._st_lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
         self.style_combo = QComboBox()
         self.style_combo.setStyleSheet(COMBO_STYLE)
         self.style_combo.currentIndexChanged.connect(self._on_style_changed)
-        st_row.addWidget(st_lbl)
+        st_row.addWidget(self._st_lbl)
         st_row.addWidget(self.style_combo, 1)
         fontgl.addLayout(st_row)
 
@@ -1200,68 +1363,50 @@ class MainWindow(QMainWindow):
 
         # Codec row
         codec_row = QHBoxLayout()
-        codec_lbl = QLabel("Codec:")
-        codec_lbl.setFixedWidth(52)
-        codec_lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
+        self._codec_lbl = QLabel("Codec:")
+        self._codec_lbl.setFixedWidth(52)
+        self._codec_lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
         self.codec_cb = QComboBox()
         self.codec_cb.addItems(["H.264 (libx264)", "H.265 (libx265)"])
         self.codec_cb.setStyleSheet(COMBO_STYLE)
         self.codec_cb.currentIndexChanged.connect(self._on_codec_changed)
-        codec_row.addWidget(codec_lbl)
+        codec_row.addWidget(self._codec_lbl)
         codec_row.addWidget(self.codec_cb, 1)
         encgl.addLayout(codec_row)
 
-        # Quality mode: CRF or Bitrate
-        mode_row = QHBoxLayout()
-        mode_lbl = QLabel("Quality:")
-        mode_lbl.setFixedWidth(52)
-        mode_lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
-        self.mode_crf_btn = QPushButton("CRF")
-        self.mode_mbps_btn = QPushButton("Mbit/s")
-        for b in (self.mode_crf_btn, self.mode_mbps_btn):
-            b.setFixedHeight(24)
-            b.setStyleSheet(BTN_SEC)
-            b.setCheckable(True)
-        self.mode_crf_btn.setChecked(True)
-        self.mode_crf_btn.clicked.connect(lambda: self._set_quality_mode("crf"))
-        self.mode_mbps_btn.clicked.connect(lambda: self._set_quality_mode("mbps"))
-        mode_row.addWidget(mode_lbl)
-        mode_row.addWidget(self.mode_crf_btn)
-        mode_row.addWidget(self.mode_mbps_btn)
-        mode_row.addStretch()
-        encgl.addLayout(mode_row)
-
-        # CRF slider (default 28 — more sane default than 23)
-        self.crf_sl = LabeledSlider("CRF", 15, 40, 28)
-        self.crf_sl.sl.setToolTip(
-            "Lower CRF = better quality but LARGER file.\n"
-            "Recommended: 28 (H.265) / 23 (H.264).\n"
-            "This is NOT a bitrate — it's a quality factor."
-        )
-        self.crf_sl.valueChanged.connect(self._update_size_hint)
-        encgl.addWidget(self.crf_sl)
-
-        # Bitrate spinbox (hidden by default)
+        # Output bitrate: logarithmic slider + spinbox for fine ±1 steps
         self.mbps_row = QWidget()
         mbps_lay = QHBoxLayout(self.mbps_row)
         mbps_lay.setContentsMargins(0, 0, 0, 0)
-        mbps_lbl = QLabel("Mbit/s:")
-        mbps_lbl.setFixedWidth(52)
-        mbps_lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
+        mbps_lay.setSpacing(6)
+        self._mbps_lbl = QLabel("Mbit/s:")
+        self._mbps_lbl.setFixedWidth(52)
+        self._mbps_lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
+        self.mbps_sl = QSlider(Qt.Orientation.Horizontal)
+        self.mbps_sl.setRange(0, 1000)
+        self.mbps_sl.setValue(self._mbps_to_slider(8))
+        self.mbps_sl.setToolTip(
+            "Drag to set output bitrate (logarithmic scale, 1–100 Mbit/s).\n"
+            "Use the arrows on the right for ±1 Mbit/s fine steps.\n"
+            "Auto-set to source average bitrate on video load."
+        )
+        self.mbps_sl.setStyleSheet(SLIDER_STYLE)
         self.mbps_spin = QSpinBox()
         self.mbps_spin.setRange(1, 100)
         self.mbps_spin.setValue(8)
         self.mbps_spin.setSuffix(" Mbit/s")
+        self.mbps_spin.setFixedWidth(90)
         self.mbps_spin.setStyleSheet(
             f"QSpinBox{{background:{_T()['surface']};color:{_T()['text']};"
             f"border:1px solid {_T()['border2']};border-radius:4px;padding:3px 6px;}}"
             f"QSpinBox::up-button,QSpinBox::down-button{{width:16px;"
             f"background:{_T()['surface2']};border-radius:2px;}}"
         )
-        self.mbps_spin.valueChanged.connect(self._update_size_hint)
-        mbps_lay.addWidget(mbps_lbl)
-        mbps_lay.addWidget(self.mbps_spin, 1)
-        self.mbps_row.setVisible(False)
+        self.mbps_sl.valueChanged.connect(self._on_mbps_sl_changed)
+        self.mbps_spin.valueChanged.connect(self._on_mbps_spin_changed)
+        mbps_lay.addWidget(self._mbps_lbl)
+        mbps_lay.addWidget(self.mbps_sl)
+        mbps_lay.addWidget(self.mbps_spin)
         encgl.addWidget(self.mbps_row)
 
         # Estimated size hint
@@ -1321,8 +1466,8 @@ class MainWindow(QMainWindow):
         _poll_timer.start()
 
         upscale_row = QHBoxLayout()
-        upscale_lbl = QLabel("Upscale output:")
-        upscale_lbl.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
+        self._upscale_lbl = QLabel("Upscale output:")
+        self._upscale_lbl.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
         self.upscale_combo = QComboBox()
         self.upscale_combo.addItems(["Off", "1440p  (2560×1440)", "2.7K  (2688×1512)", "4K  (3840×2160)"])
         self.upscale_combo.setStyleSheet(COMBO_STYLE)
@@ -1330,7 +1475,7 @@ class MainWindow(QMainWindow):
             "Scale the output video to a higher resolution using Lanczos.\n"
             "Useful when source is 1080p and you want a sharper result on a high-res display."
         )
-        upscale_row.addWidget(upscale_lbl)
+        upscale_row.addWidget(self._upscale_lbl)
         upscale_row.addWidget(self.upscale_combo, 1)
         encgl.addLayout(upscale_row)
 
@@ -1402,25 +1547,27 @@ class MainWindow(QMainWindow):
         # Collect buttons and labels for theme reapply
         # (theme uses findChildren — no explicit list needed)
 
-        QTimer.singleShot(200, lambda: self._on_fw_changed(self.fw_combo.currentText()))
-
-    # ── Quality mode ──────────────────────────────────────────────────────────
-
-    def _set_quality_mode(self, mode):
-        self.mode_crf_btn.setChecked(mode == "crf")
-        self.mode_mbps_btn.setChecked(mode == "mbps")
-        self.crf_sl.setVisible(mode == "crf")
-        self.mbps_row.setVisible(mode == "mbps")
-        self._update_size_hint()
+        QTimer.singleShot(200, lambda: self._on_fw_changed("Betaflight"))
 
     def _on_codec_changed(self):
-        # Adjust default CRF when switching codec
-        if "265" in self.codec_cb.currentText():
-            if self.crf_sl.value() == 23:
-                self.crf_sl.setValue(28)
-        else:
-            if self.crf_sl.value() == 28:
-                self.crf_sl.setValue(23)
+        self._update_size_hint()
+
+    @staticmethod
+    def _mbps_to_slider(mbps):
+        mbps = max(1, min(100, int(mbps)))
+        return round(math.log(mbps) / math.log(100) * 1000)
+
+    def _on_mbps_sl_changed(self, pos):
+        v = max(1, min(100, round(math.exp(pos / 1000 * math.log(100)))))
+        self.mbps_spin.blockSignals(True)
+        self.mbps_spin.setValue(v)
+        self.mbps_spin.blockSignals(False)
+        self._update_size_hint()
+
+    def _on_mbps_spin_changed(self, v):
+        self.mbps_sl.blockSignals(True)
+        self.mbps_sl.setValue(self._mbps_to_slider(v))
+        self.mbps_sl.blockSignals(False)
         self._update_size_hint()
 
     def _update_size_hint(self):
@@ -1431,34 +1578,10 @@ class MainWindow(QMainWindow):
         in_pct  = self.trim_sel.in_pct  if hasattr(self, 'trim_sel') else 0.0
         out_pct = self.trim_sel.out_pct if hasattr(self, 'trim_sel') else 1.0
         dur     = self.video_dur * (out_pct - in_pct)
-        gpu_on = self.hw_check.isChecked() and self.hw_check.isEnabled()
-        is_265 = "265" in self.codec_cb.currentText()
-        if self.mode_mbps_btn.isChecked():
-            mbps   = self.mbps_spin.value()
-            est_mb = mbps * dur / 8
-            self.size_hint.setText(f"≈ {est_mb:.0f} MB at {mbps} Mbit/s")
-            return
-        crf = self.crf_sl.value()
-        # Anchored to source bitrate for accuracy on FPV high-motion content.
-        # After NVENC CQ normalisation (+9 offset applied in video_processor):
-        #   CPU H.265 CRF 28 ≈ 0.7× src  CPU H.264 CRF 23 ≈ 1.0× src
-        #   GPU NVENC (any)  CRF 23 ≈ 1.2× src  (slightly less efficient than x264)
-        # Every 6 CRF steps = 2× bitrate.
-        if self.source_mbps > 0.1:
-            s = self.source_mbps
-            if gpu_on:
-                base, ref = s * 1.2, 23
-            elif is_265:
-                base, ref = s * 0.7, 28
-            else:
-                base, ref = s * 1.0, 23
-        else:
-            base, ref = (5.0, 28) if is_265 else (8.0, 23)
-        est_mbps = base * (2 ** ((ref - crf) / 6.0))
-        est_mb   = est_mbps * dur / 8
+        mbps    = self.mbps_spin.value()
+        est_mb  = mbps * dur / 8
         src_note = f"  src {self.source_mbps:.1f} Mbit/s" if self.source_mbps > 0.1 else ""
-        gpu_note = " · GPU" if gpu_on else ""
-        self.size_hint.setText(f"≈ {est_mb:.0f} MB  (~{est_mbps:.1f} Mbit/s{src_note}{gpu_note})")
+        self.size_hint.setText(f"≈ {est_mb:.0f} MB at {mbps} Mbit/s{src_note}")
 
     # ── Font ──────────────────────────────────────────────────────────────────
 
@@ -1513,6 +1636,19 @@ class MainWindow(QMainWindow):
 
     # ── File selection ────────────────────────────────────────────────────────
 
+    def _on_file_dropped(self, path):
+        ext = os.path.splitext(path)[1].lower()
+        if ext in ('.mp4', '.mkv', '.avi', '.mov'):
+            self.video_row.set_path(path)
+            self._load_video(path)
+            self._auto_detect(path)
+        elif ext == '.osd':
+            self._load_osd(path)
+            self._auto_detect(path)
+        elif ext == '.srt':
+            self._load_srt(path)
+            self._auto_detect(path)
+
     def _auto_detect(self, base_path):
         p = Path(base_path); stem = p.stem; dirp = p.parent
         ext = p.suffix.lower()
@@ -1529,10 +1665,14 @@ class MainWindow(QMainWindow):
             if candidates['.srt'].exists(): self._load_srt(str(candidates['.srt']))
         elif ext == '.osd':
             if candidates['.srt'].exists(): self._load_srt(str(candidates['.srt']))
-            if candidates['.mp4'].exists(): self._load_video(str(candidates['.mp4']))
+            if candidates['.mp4'].exists():
+                self.video_row.set_path(str(candidates['.mp4']))
+                self._load_video(str(candidates['.mp4']))
         elif ext == '.srt':
             if candidates['.osd'].exists(): self._load_osd(str(candidates['.osd']))
-            if candidates['.mp4'].exists(): self._load_video(str(candidates['.mp4']))
+            if candidates['.mp4'].exists():
+                self.video_row.set_path(str(candidates['.mp4']))
+                self._load_video(str(candidates['.mp4']))
 
     # ── Theme ─────────────────────────────────────────────────────────────────
 
@@ -1611,6 +1751,10 @@ class MainWindow(QMainWindow):
             ck.setStyleSheet(f"color:{t['text']};font-size:{_fs(11)}px;")
         for div in getattr(self, '_dividers', []):
             div.setStyleSheet(f"color:{t['border']};")
+        for w in self.findChildren(LabeledSlider):
+            w.refresh_theme()
+        for w in self.findChildren(InfoCard):
+            w.refresh_theme()
 
         # File rows
         for row in [self.video_row, self.osd_row, self.srt_row, self.out_row]:
@@ -1618,6 +1762,7 @@ class MainWindow(QMainWindow):
             row.path_lbl.setStyleSheet(PATH_FILLED if row.path else PATH_EMPTY)
             row.btn.setStyleSheet(BTN_SEC)
             row.clr.setStyleSheet(BTN_DANGER)
+        self.drop_zone.refresh_theme()
 
         # Preview panel
         self._preview_panel.setStyleSheet(
@@ -1646,8 +1791,6 @@ class MainWindow(QMainWindow):
         self._rst_pos_btn.setStyleSheet(BTN_SEC)
         self._rst_offset_btn.setStyleSheet(BTN_SEC)
         self._trim_rst_btn.setStyleSheet(BTN_SEC)
-        self.mode_crf_btn.setStyleSheet(BTN_SEC)
-        self.mode_mbps_btn.setStyleSheet(BTN_SEC)
         self.trim_sel.update()
 
         # SpinBoxes
@@ -1665,12 +1808,17 @@ class MainWindow(QMainWindow):
 
         # Inline subtext labels (constructed with hardcoded colours at init time)
         for lbl, style in [
-            (self.frame_info,  f"color:{t['muted']};font-size:{_fs(10)}px;"),
-            (self.size_hint,   f"color:{t['muted']};font-size:{_fs(10)}px;"),
-            (self.status,      f"color:{t['muted']};font-size:{_fs(10)}px;"),
-            (self.frame_lbl,   f"color:{t['text']};font-size:{_fs(11)}px;font-weight:bold;"),
-            (self.osd_warn,    f"color:{t['orange']};font-size:{_fs(10)}px;"),
-            (self._sync_lbl,   f"color:{t['subtext']};font-size:{_fs(11)}px;"),
+            (self.frame_info,    f"color:{t['muted']};font-size:{_fs(10)}px;"),
+            (self.size_hint,     f"color:{t['muted']};font-size:{_fs(10)}px;"),
+            (self.status,        f"color:{t['muted']};font-size:{_fs(10)}px;"),
+            (self.frame_lbl,     f"color:{t['text']};font-size:{_fs(11)}px;font-weight:bold;"),
+            (self.osd_warn,      f"color:{t['orange']};font-size:{_fs(10)}px;"),
+            (self._sync_lbl,     f"color:{t['subtext']};font-size:{_fs(11)}px;"),
+
+            (self._st_lbl,       f"color:{t['subtext']};font-size:{_fs(11)}px;"),
+            (self._codec_lbl,    f"color:{t['subtext']};font-size:{_fs(11)}px;"),
+            (self._mbps_lbl,     f"color:{t['subtext']};font-size:{_fs(11)}px;"),
+            (self._upscale_lbl,  f"color:{t['text']};font-size:{_fs(11)}px;"),
         ]:
             lbl.setStyleSheet(style)
 
@@ -1725,8 +1873,11 @@ class MainWindow(QMainWindow):
             self.video_fps = info.get("fps", 60.0)
             self.video_dur = info.get("duration", 0.0)
             size_mb = info.get("size_mb", 0) or 0
-            # Source bitrate in Mbit/s — used to calibrate output size estimate
+            # Source bitrate in Mbit/s — auto-sets the output bitrate spinbox
             self.source_mbps = (size_mb * 8 / max(self.video_dur, 1)) if self.video_dur > 0 else 0
+            if self.source_mbps > 0.5:
+                # Clamp to spinbox range; _on_mbps_spin_changed syncs the slider
+                self.mbps_spin.setValue(max(1, min(100, round(self.source_mbps))))
             self.vid_card.add_row("Res",  f"{info.get('width')}×{info.get('height')}")
             self.vid_card.add_row("FPS",  str(info.get("fps", "?")))
             _dm, _ds = divmod(int(self.video_dur), 60)
@@ -1813,11 +1964,7 @@ class MainWindow(QMainWindow):
             fc = (self.osd_data.stats.fc_type or "").strip()
             fw_map = {"Betaflight": "Betaflight", "INAV": "INAV",
                       "ArduPilot": "ArduPilot", "ARDU": "ArduPilot"}
-            fw_match = fw_map.get(fc)
-            if fw_match:
-                idx = self.fw_combo.findText(fw_match)
-                if idx >= 0:
-                    self.fw_combo.setCurrentIndex(idx)   # triggers _on_fw_changed
+            self._on_fw_changed(fw_map.get(fc, "Betaflight"))
             self._st(f"✓ OSD: {self.osd_data.frame_count} frames  [{fc or 'Unknown FC'}]")
             self._refresh_preview()
         except Exception as e:
@@ -1853,11 +2000,8 @@ class MainWindow(QMainWindow):
             self._st(f"✗ P1 OSD: {e}")
 
     def _auto_select_font(self, firmware: str, preferred_folder: str):
-        """Select firmware in the fw_combo and pick a specific font folder by name."""
-        # Switch firmware tab (Betaflight / INAV / etc.)
-        idx = self.fw_combo.findText(firmware)
-        if idx >= 0 and self.fw_combo.currentIndex() != idx:
-            self.fw_combo.setCurrentIndex(idx)   # triggers _on_fw_changed → rebuilds style_combo
+        """Switch firmware context and pick a specific font folder by name."""
+        self._on_fw_changed(firmware)
         # Now find the preferred folder in the style combo
         for i in range(self.style_combo.count()):
             if self.style_combo.itemData(i) == preferred_folder:
@@ -2204,14 +2348,9 @@ class MainWindow(QMainWindow):
             if os.path.isdir(candidate):
                 font_folder = candidate
 
-        # Quality: CRF mode or bitrate mode
-        if self.mode_mbps_btn.isChecked():
-            crf_val  = 23  # not used directly
-            # Pass bitrate via CRF field — video_processor will use -b:v
-            bitrate_mbps = self.mbps_spin.value()
-        else:
-            crf_val = self.crf_sl.value()
-            bitrate_mbps = None
+        # Quality: always bitrate mode
+        crf_val      = 23   # kept for ProcessingConfig field; unused
+        bitrate_mbps = self.mbps_spin.value()
 
         # Recompute output filename with final trim timestamps
         trim_s = self.trim_sel.in_pct  * self.video_dur
