@@ -1,0 +1,17 @@
+{
+  "name": "OpenIPC Default",
+  "reverse_enabled": true,
+  "yoff_strength": 0.25,
+  "black_lift": 0.020,
+  "brightness": 0.0,
+  "contrast": 1.0,
+  "gamma": 1.0,
+  "lift": -0.15,
+  "gain": 1.75,
+  "hue": 0.0,
+  "saturation": -22.5,
+  "r_mult": 1.0,
+  "g_mult": 1.0,
+  "b_mult": 1.0,
+  "glsl_shader": ""
+}

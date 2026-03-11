@@ -36,7 +36,9 @@ from p1_osd_parser import detect_p1, parse_p1_osd, p1_to_osd_file
 from font_loader   import (fonts_by_firmware, load_font, load_font_from_file,
                            OsdFont, FIRMWARE_PREFIXES)
 from osd_renderer  import OsdRenderConfig, render_osd_frame, render_fallback
-from video_processor import ProcessingConfig, process_video, get_video_info, find_ffmpeg, detect_hw_encoder
+from video_processor import (ProcessingConfig, ColorTransConfig, process_video,
+                             get_video_info, find_ffmpeg, detect_hw_encoder,
+                             detect_libplacebo)
 from splash_screen   import SplashScreen
 
 
@@ -68,17 +70,20 @@ def _fs(n: int) -> int:
 
 _OSD_OFFSET_MS = 0  # persisted OSD sync offset (ms)
 
+_COLORTRANS_SETTINGS: dict = {}  # loaded from settings.json "colortrans" key
+
 def _load_settings():
-    global _UI_SCALE, _OSD_OFFSET_MS
+    global _UI_SCALE, _OSD_OFFSET_MS, _COLORTRANS_SETTINGS
     try:
         with open(_SETTINGS_FILE) as f:
             data = json.load(f)
         _UI_SCALE      = float(data.get("ui_scale", 1.0))
         _OSD_OFFSET_MS = int(data.get("osd_offset_ms", 0))
+        _COLORTRANS_SETTINGS = data.get("colortrans", {})
     except Exception:
         pass
 
-def _save_settings():
+def _save_settings(**extra):
     try:
         data: dict = {}
         try:
@@ -88,6 +93,7 @@ def _save_settings():
             pass
         data["ui_scale"]      = _UI_SCALE
         data["osd_offset_ms"] = _OSD_OFFSET_MS
+        data.update(extra)
         with open(_SETTINGS_FILE, "w") as f:
             json.dump(data, f, indent=2)
     except Exception:
@@ -118,8 +124,8 @@ def _build_styles():
     # Light: group titles use subtext (softer), dark: keep accent (blue)
     title_col = t['subtext'] if is_light else t['accent']
     GROUP_STYLE = (
-        f"QGroupBox{{border:1px solid {t['border']};border-radius:8px;margin-top:8px;"
-        f"padding:6px;font-weight:bold;color:{title_col};font-size:{_fs(11)}px;}}"
+        f"QGroupBox{{border:1px solid {t['border']};border-radius:8px;margin-top:4px;"
+        f"padding:4px;font-weight:bold;color:{title_col};font-size:{_fs(11)}px;}}"
         f"QGroupBox::title{{subcontrol-origin:margin;left:10px;padding:0 4px;}}"
     )
     PATH_EMPTY  = (f"background:{t['bg2']};color:{t['muted']};border:1px solid {t['border']};"
@@ -641,7 +647,7 @@ class MainWindow(QMainWindow):
         self.worker      = None
         self._font_db:   dict = {}
         self.source_mbps: float = 0.0   # source video bitrate, set after loading
-        self._dividers:    list = []
+        self._dividers:    list = []   # legacy, kept for compat
 
         self.setWindowTitle(f"VueOSD v{VERSION} — Digital FPV OSD Tool")
         # App icon — resolved relative to this script so it works from any CWD
@@ -651,38 +657,33 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1100, 700)
         self.setStyleSheet(APP_STYLE)
 
-        # ── Root splitter: left | centre+bottom | right ───────────────────────
-        root = QHBoxLayout()
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        cw = QWidget()
-        cw.setLayout(root)
-        self.setCentralWidget(cw)
+        # ── Root splitter: left | centre | right (resizable via drag handles) ──
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.setChildrenCollapsible(False)
+        self._splitter.setHandleWidth(5)
+        self.setCentralWidget(self._splitter)
 
         left_scroll = self._build_left_panel()
-
         centre = self._build_centre_panel()
-
         right = self._build_right_panel()
 
-        # ── Assemble root layout ──────────────────────────────────────────────
-        root.addWidget(left_scroll)
-        root.addWidget(centre, 1)
-        root.addWidget(right)
+        self._splitter.addWidget(left_scroll)
+        self._splitter.addWidget(centre)
+        self._splitter.addWidget(right)
 
-        # Vertical dividers
-        for w in (left_scroll, centre):
-            div = QFrame()
-            div.setFrameShape(QFrame.Shape.VLine)
-            self._dividers.append(div)
-            div.setStyleSheet(f"color:{_T()['border']};")
-            div.setFixedWidth(1)
-            root.insertWidget(root.indexOf(w) + 1, div)
+        # Initial sizes: left 300, centre stretches, right 300
+        self._splitter.setStretchFactor(0, 0)
+        self._splitter.setStretchFactor(1, 1)
+        self._splitter.setStretchFactor(2, 0)
+        self._splitter.setSizes([300, 500, 300])
+
+        self._update_splitter_style()
 
         # Collect buttons and labels for theme reapply
         # (theme uses findChildren — no explicit list needed)
 
         QTimer.singleShot(200, lambda: self._on_fw_changed("Betaflight"))
+        QTimer.singleShot(300, self._cc_restore_from_settings)
 
     def _build_left_panel(self) -> "QScrollArea":
         """Build and return the left scrollable panel."""
@@ -694,8 +695,8 @@ class MainWindow(QMainWindow):
             "QScrollBar:vertical{background:#1e1e2e;width:6px;border-radius:3px;}"
             "QScrollBar::handle:vertical{background:#45475a;border-radius:3px;}"
         )
-        left_scroll.setMinimumWidth(300)
-        left_scroll.setMaximumWidth(400)
+        left_scroll.setMinimumWidth(250)
+        left_scroll.setMaximumWidth(500)
 
         left_inner = QWidget()
         left_inner.setMinimumWidth(280)
@@ -929,14 +930,18 @@ class MainWindow(QMainWindow):
         # Create frame_info alias for theme code
         self.frame_info = self._player_panel.transport.info_lbl
 
-        # ── Smashicons credit ─────────────────────────────────────────────────
+        # ── Credits ───────────────────────────────────────────────────────────
         credit = QLabel(
             'Icons by <a href="https://www.flaticon.com/free-icons/wifi-connection" '
             'style="color:#2a2a3a;text-decoration:none;">Smashicons \u2013 Flaticon</a>'
+            '  &middot;  Color correction based on '
+            '<a href="https://github.com/sickgreg/VfxEnc" '
+            'style="color:#2a2a3a;text-decoration:none;">VfxEnc</a> by sickgreg'
         )
         credit.setStyleSheet(f"color:{_T()['muted']};font-size:8px;")
         credit.setOpenExternalLinks(True)
         credit.setAlignment(Qt.AlignmentFlag.AlignRight)
+        credit.setWordWrap(True)
         cl.addWidget(credit)
 
         cl.addWidget(_sep())
@@ -1019,35 +1024,163 @@ class MainWindow(QMainWindow):
         cl.addLayout(below)
         return centre
 
+    def _build_color_correction_group(self, rl):
+        """Build color correction collapsible group and add to layout."""
+        t = _T()
+
+        self._cc_group = QGroupBox("Color Correction")
+        self._cc_group.setStyleSheet(GROUP_STYLE)
+        ccl = QVBoxLayout(self._cc_group)
+        ccl.setSpacing(2)
+        ccl.setContentsMargins(10, 14, 10, 6)
+
+        self.cc_enable = QCheckBox("Enable color correction")
+        self.cc_enable.setStyleSheet(f"color:{t['text']};font-size:11px;")
+        self.cc_enable.stateChanged.connect(self._on_color_changed)
+        ccl.addWidget(self.cc_enable)
+
+        # Container for all CC controls — hidden until "Enable" is checked
+        self._cc_content = QWidget()
+        _cc_inner = QVBoxLayout(self._cc_content)
+        _cc_inner.setContentsMargins(0, 0, 0, 0)
+        _cc_inner.setSpacing(6)
+        self._cc_content.setVisible(False)
+        self.cc_enable.toggled.connect(self._cc_content.setVisible)
+        ccl.addWidget(self._cc_content)
+        ccl = _cc_inner  # alias: all remaining widgets go into the inner container
+
+        # ── Helper: create a LabeledSlider, connect it, add to layout ──
+        def _slider(attr, label, lo, hi, default, suffix=""):
+            s = LabeledSlider(label, lo, hi, default, suffix)
+            s.valueChanged.connect(self._on_color_changed)
+            ccl.addWidget(s)
+            setattr(self, attr, s)
+
+        # ── Helper: create a QCheckBox, connect it, add to layout ──
+        def _check(attr, label, checked=False):
+            cb = QCheckBox(label)
+            cb.setChecked(checked)
+            cb.setStyleSheet(f"color:{t['text']};font-size:11px;")
+            cb.stateChanged.connect(self._on_color_changed)
+            ccl.addWidget(cb)
+            setattr(self, attr, cb)
+
+        # Reverse ColorTrans sub-section
+        _check("cc_reverse", "Reverse ColorTrans", checked=True)
+        _slider("cc_yoff",  "Y-offset",  0, 100, 25, "%")
+        _slider("cc_blift", "Blk lift",  0, 100, 20)
+
+        ccl.addWidget(_sep())
+
+        # Grading sliders
+        _slider("cc_brightness", "Bright",   -100, 100, 0)
+        _slider("cc_contrast",   "Contrast",  0, 300, 100, "%")
+        _slider("cc_gamma",      "Gamma",     10, 300, 100)
+        _slider("cc_lift",       "Lift",      -100, 100, -15)
+        _slider("cc_gain",       "Gain",      0, 500, 175)
+        _slider("cc_hue",        "Hue",       -180, 180, 0, "°")
+        _slider("cc_sat",        "Satur.",    -100, 100, -22)
+
+        # RGB multipliers — button opens popup dialog
+        self._cc_rgb_btn = QPushButton("R / G / B:  1.00 / 1.00 / 1.00")
+        self._cc_rgb_btn.setStyleSheet(BTN_SEC)
+        self._cc_rgb_btn.setFixedHeight(26)
+        self._cc_rgb_btn.clicked.connect(self._cc_open_rgb_popup)
+        ccl.addWidget(self._cc_rgb_btn)
+
+        # Hidden sliders for RGB values (no UI inline, edited via popup)
+        for attr in ("cc_r", "cc_g", "cc_b"):
+            s = QSlider(); s.setRange(0, 400); s.setValue(100); s.setVisible(False)
+            setattr(self, attr, s)
+
+        ccl.addWidget(_sep())
+
+        # Custom GLSL shader
+        self.cc_glsl_row = FileRow("GLSL", "Optional .glsl shader…",
+                                    "GLSL Shaders (*.glsl *.hook)")
+        self.cc_glsl_row.btn.clicked.disconnect()
+        self.cc_glsl_row.btn.clicked.connect(self._cc_browse_glsl)
+        ccl.addWidget(self.cc_glsl_row)
+
+        self._cc_glsl_warn = QLabel("")
+        self._cc_glsl_warn.setStyleSheet(f"color:{t['orange']};font-size:10px;")
+        self._cc_glsl_warn.setWordWrap(True)
+        self._cc_glsl_warn.setVisible(False)
+        ccl.addWidget(self._cc_glsl_warn)
+
+        # Preset + Reset row
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(4)
+        self._cc_preset_lbl = QLabel("Preset:")
+        self._cc_preset_lbl.setStyleSheet(f"color:{t['subtext']};font-size:11px;")
+        self._cc_preset_lbl.setFixedWidth(48)
+        self.cc_preset_cb = QComboBox()
+        self.cc_preset_cb.setStyleSheet(COMBO_STYLE)
+        self.cc_preset_cb.currentIndexChanged.connect(self._on_cc_preset_changed)
+        self._cc_save_btn = QPushButton("Save…")
+        self._cc_save_btn.setStyleSheet(BTN_SEC)
+        self._cc_save_btn.setFixedHeight(24)
+        self._cc_save_btn.clicked.connect(self._cc_save_preset)
+        self._cc_rst_btn = QPushButton("Reset")
+        self._cc_rst_btn.setStyleSheet(BTN_SEC)
+        self._cc_rst_btn.setFixedHeight(24)
+        self._cc_rst_btn.setToolTip("Reset all color correction to defaults")
+        self._cc_rst_btn.clicked.connect(self._cc_reset_defaults)
+        preset_row.addWidget(self._cc_preset_lbl)
+        preset_row.addWidget(self.cc_preset_cb, 1)
+        preset_row.addWidget(self._cc_save_btn)
+        preset_row.addWidget(self._cc_rst_btn)
+        ccl.addLayout(preset_row)
+
+        rl.addWidget(self._cc_group)
+
+        # Load presets into combo
+        self._cc_presets = {}  # name -> dict
+        self._cc_loading_preset = False
+        self._cc_scan_presets()
+
     def _build_right_panel(self) -> QWidget:
         """Build and return the right panel (encoding + output)."""
+        # Outer container: scroll area on top, fixed bottom section
+        right_outer = QWidget()
+        right_outer.setMinimumWidth(250)
+        right_outer.setMaximumWidth(500)
+        outer_lay = QVBoxLayout(right_outer)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.setSpacing(0)
+
+        # ── Scrollable area (color correction + encoding settings) ───────────
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setStyleSheet(
+            "QScrollArea{border:none;background:transparent;}"
+            "QScrollBar:vertical{background:#1e1e2e;width:6px;border-radius:3px;}"
+            "QScrollBar::handle:vertical{background:#45475a;border-radius:3px;}"
+        )
+        self._right_scroll = right_scroll
+
         right = QWidget()
-        right.setMinimumWidth(260)
-        right.setMaximumWidth(360)
+        right.setMinimumWidth(240)
         rl = QVBoxLayout(right)
-        rl.setContentsMargins(10, 16, 14, 16)
-        rl.setSpacing(10)
+        rl.setContentsMargins(10, 10, 14, 4)
+        rl.setSpacing(6)
 
-        self._out_hdr = QLabel("Output & Encoding")
-        self._out_hdr.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-        self._out_hdr.setStyleSheet(f"color:{_T()['subtext']}")
-        rl.addWidget(self._out_hdr)
+        # ── Color Correction group (collapsible) ─────────────────────────────
+        self._build_color_correction_group(rl)
 
-        # Output file
-        out_fg = QGroupBox("Output File")
-        out_fg.setStyleSheet(GROUP_STYLE)
-        out_fgl = QVBoxLayout(out_fg)
-        out_fgl.setContentsMargins(10, 16, 10, 10)
-        self.out_row = FileRow("Output", "Choose output path…", "", save_mode=True, icon=_icon("save.png", 16), icon_name="save.png")
-        out_fgl.addWidget(self.out_row)
-        rl.addWidget(out_fg)
-
-        # Encoding settings
-        encg = QGroupBox("Encoding")
+        # ── Output & Encoding (merged) ───────────────────────────────────────
+        encg = QGroupBox("Output & Encoding")
         encg.setStyleSheet(GROUP_STYLE)
         encgl = QVBoxLayout(encg)
-        encgl.setSpacing(7)
-        encgl.setContentsMargins(10, 16, 10, 10)
+        encgl.setSpacing(4)
+        encgl.setContentsMargins(10, 14, 10, 8)
+
+        # Output file row
+        self.out_row = FileRow("Output", "Choose output path…", "", save_mode=True, icon=_icon("save.png", 16), icon_name="save.png")
+        encgl.addWidget(self.out_row)
+
+        encgl.addWidget(_sep())
 
         # Codec row
         codec_row = QHBoxLayout()
@@ -1102,21 +1235,21 @@ class MainWindow(QMainWindow):
         self.size_hint.setStyleSheet(f"color:{_T()['muted']};font-size:10px;")
         encgl.addWidget(self.size_hint)
 
-        # GPU row — detection runs in background so it never blocks startup
-        self.hw_check = QCheckBox("⚡  GPU acceleration")
+        # GPU row — checkbox + status on same line
+        gpu_row = QHBoxLayout()
+        gpu_row.setSpacing(6)
+        self.hw_check = QCheckBox("⚡ GPU")
         self.hw_check.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
         self.hw_check.setEnabled(False)
         self.hw_check.setChecked(False)
         self.hw_check.stateChanged.connect(self._update_size_hint)
-        self.hw_lbl = QLabel("Detecting GPU…")
+        self.hw_lbl = QLabel("Detecting…")
         self.hw_lbl.setStyleSheet(f"color:{_T()['muted']};font-size:10px;")
-        encgl.addWidget(self.hw_check)
-        encgl.addWidget(self.hw_lbl)
+        gpu_row.addWidget(self.hw_check)
+        gpu_row.addWidget(self.hw_lbl, 1)
+        encgl.addLayout(gpu_row)
 
         # Kick off GPU detection in background.
-        # Result is written to _gpu_result[], polled by a QTimer on the main thread.
-        # QTimer.singleShot() from a non-main thread is unreliable on Windows —
-        # using a poll timer avoids that entirely.
         _gpu_result = [None]   # None=pending, False=done-no-gpu, dict=done-found
         _gpu_done   = [False]
 
@@ -1168,37 +1301,46 @@ class MainWindow(QMainWindow):
         encgl.addLayout(upscale_row)
 
         rl.addWidget(encg)
+        rl.addStretch()
+        right_scroll.setWidget(right)
+        outer_lay.addWidget(right_scroll, 1)
 
-        # Progress — custom painted bar (stylesheet chunk is unreliable on Windows)
+        # ── Fixed bottom section (render controls — not scrollable) ──────────
+        bottom = QWidget()
+        bl = QVBoxLayout(bottom)
+        bl.setContentsMargins(10, 4, 14, 8)
+        bl.setSpacing(4)
+
+        # Progress bar
         self.prog = RenderBar()
-        rl.addWidget(self.prog)
+        bl.addWidget(self.prog)
 
         self.status = QLabel("Ready")
         self.status.setStyleSheet(f"color:{_T()['muted']};font-size:10px;")
         self.status.setWordWrap(True)
-        rl.addWidget(self.status)
+        bl.addWidget(self.status)
 
         # OSD trimmed warning (hidden by default)
         self.osd_warn = QLabel("⚠ No OSD elements in trim window — rendering without OSD overlay")
         self.osd_warn.setStyleSheet(f"color:{_T()['orange']};font-size:10px;")
         self.osd_warn.setWordWrap(True)
         self.osd_warn.setVisible(False)
-        rl.addWidget(self.osd_warn)
+        bl.addWidget(self.osd_warn)
 
         # Render + Stop buttons
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
 
         self.render_btn = QPushButton("  Render Video")
-        self.render_btn.setIcon(_icon("render.png", 20))
-        self.render_btn.setFixedHeight(42)
-        self.render_btn.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self.render_btn.setIcon(_icon("render.png", 18))
+        self.render_btn.setFixedHeight(36)
+        self.render_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         self.render_btn.setStyleSheet(BTN_PRIMARY)
         self.render_btn.clicked.connect(self._render)
 
         self.stop_btn = QPushButton()
-        self.stop_btn.setIcon(_icon("stop.png", 20))
-        self.stop_btn.setFixedSize(42, 42)
+        self.stop_btn.setIcon(_icon("stop.png", 18))
+        self.stop_btn.setFixedSize(36, 36)
         self.stop_btn.setStyleSheet(BTN_STOP)
         self.stop_btn.setToolTip("Stop render")
         self.stop_btn.clicked.connect(self._stop_render)
@@ -1206,16 +1348,16 @@ class MainWindow(QMainWindow):
 
         btn_row.addWidget(self.render_btn, 1)
         btn_row.addWidget(self.stop_btn)
-        rl.addLayout(btn_row)
+        bl.addLayout(btn_row)
 
         # FFmpeg status
         self.ffmpeg_lbl = QLabel()
         self.ffmpeg_lbl.setWordWrap(True)
         self._refresh_ffmpeg_status()
-        rl.addWidget(self.ffmpeg_lbl)
+        bl.addWidget(self.ffmpeg_lbl)
 
-        rl.addStretch()
-        return right
+        outer_lay.addWidget(bottom)
+        return right_outer
 
     def _on_codec_changed(self):
         self._update_size_hint()
@@ -1397,10 +1539,23 @@ class MainWindow(QMainWindow):
         if self._theme_editor_dlg:
             self._theme_editor_dlg.reload_from_theme()   # sync editor panels
 
+    def _update_splitter_style(self):
+        """Style the QSplitter drag handles to match the current theme."""
+        t = _T()
+        self._splitter.setStyleSheet(f"""
+            QSplitter::handle {{
+                background: {t['border']};
+            }}
+            QSplitter::handle:hover {{
+                background: {t['accent']};
+            }}
+        """)
+
     def _apply_theme(self):
         """Reapply all stylesheets after a theme change."""
         t = _T()
         self.setStyleSheet(APP_STYLE)
+        self._update_splitter_style()
 
         # Palette + theme toggle buttons
         _icon_btn_ss = (
@@ -1421,13 +1576,14 @@ class MainWindow(QMainWindow):
         self._h2.setStyleSheet(f"color:{t['text']};")
         self._scale_lbl.setStyleSheet(f"color:{t['muted']};font-size:{_fs(10)}px;")
         self._prev_lbl.setStyleSheet(f"color:{t['subtext']};")
-        self._out_hdr.setStyleSheet(f"color:{t['subtext']};")
 
-        self._left_scroll.setStyleSheet(
+        _scroll_ss = (
             f"QScrollArea{{border:none;background:transparent;}}"
             f"QScrollBar:vertical{{background:{t['bg']};width:6px;border-radius:3px;}}"
             f"QScrollBar::handle:vertical{{background:{t['surface2']};border-radius:3px;}}"
         )
+        self._left_scroll.setStyleSheet(_scroll_ss)
+        self._right_scroll.setStyleSheet(_scroll_ss)
 
         # Structural widgets
         for gb in self.findChildren(QGroupBox):
@@ -1446,7 +1602,8 @@ class MainWindow(QMainWindow):
             w.refresh_theme()
 
         # File rows
-        for row in [self.video_row, self.osd_row, self.srt_row, self.out_row]:
+        for row in [self.video_row, self.osd_row, self.srt_row, self.out_row,
+                     self.cc_glsl_row]:
             row._name_lbl.setStyleSheet(f"color:{t['subtext']}")
             row.path_lbl.setStyleSheet(PATH_FILLED if row.path else PATH_EMPTY)
             row.btn.setStyleSheet(BTN_SEC)
@@ -1469,6 +1626,9 @@ class MainWindow(QMainWindow):
         self._rst_pos_btn.setStyleSheet(BTN_SEC)
         self._rst_offset_btn.setStyleSheet(BTN_SEC)
         self._player_panel.trim_rst_btn.setStyleSheet(BTN_SEC)
+        self._cc_save_btn.setStyleSheet(BTN_SEC)
+        self._cc_rst_btn.setStyleSheet(BTN_SEC)
+        self._cc_rgb_btn.setStyleSheet(BTN_SEC)
 
         # SpinBoxes
         _sb_style = (
@@ -1495,6 +1655,7 @@ class MainWindow(QMainWindow):
             (self._codec_lbl,    f"color:{t['subtext']};font-size:{_fs(11)}px;"),
             (self._mbps_lbl,     f"color:{t['subtext']};font-size:{_fs(11)}px;"),
             (self._upscale_lbl,  f"color:{t['text']};font-size:{_fs(11)}px;"),
+            (self._cc_preset_lbl, f"color:{t['subtext']};font-size:{_fs(11)}px;"),
         ]:
             lbl.setStyleSheet(style)
 
@@ -1751,6 +1912,325 @@ class MainWindow(QMainWindow):
     def _queue_preview(self):
         """Debounced preview refresh — fires 60ms after sliders stop moving."""
         self._player_panel.controller.queue_refresh()
+
+    # ── Color Correction ─────────────────────────────────────────────────────
+
+    def _cc_open_rgb_popup(self):
+        """Open a small dialog with R/G/B sliders."""
+        t = _T()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("RGB Multipliers")
+        dlg.setMinimumWidth(320)
+        dlg.setStyleSheet(f"background:{t['bg']};")
+        vl = QVBoxLayout(dlg)
+        vl.setSpacing(8)
+        vl.setContentsMargins(16, 16, 16, 12)
+
+        note = QLabel("Adjust per-channel gain (1.0 = neutral)")
+        note.setStyleSheet(f"color:{t['muted']};font-size:10px;")
+        vl.addWidget(note)
+
+        r_sl = LabeledSlider("Red", 0, 400, self.cc_r.value())
+        g_sl = LabeledSlider("Green", 0, 400, self.cc_g.value())
+        b_sl = LabeledSlider("Blue", 0, 400, self.cc_b.value())
+
+        # Show values as x.xx instead of raw int
+        def _fmt(sl, v):
+            sl.vl.setText(f"{v / 100:.2f}")
+        for sl in (r_sl, g_sl, b_sl):
+            _fmt(sl, sl.value())
+            sl.valueChanged.connect(lambda v, s=sl: _fmt(s, v))
+
+        vl.addWidget(r_sl)
+        vl.addWidget(g_sl)
+        vl.addWidget(b_sl)
+
+        # Live preview: update hidden sliders as popup changes
+        def _apply():
+            self.cc_r.setValue(r_sl.value())
+            self.cc_g.setValue(g_sl.value())
+            self.cc_b.setValue(b_sl.value())
+            self._on_color_changed()
+
+        r_sl.valueChanged.connect(lambda _: _apply())
+        g_sl.valueChanged.connect(lambda _: _apply())
+        b_sl.valueChanged.connect(lambda _: _apply())
+
+        btn_row = QHBoxLayout()
+        rst_btn = QPushButton("Reset (1.0)")
+        rst_btn.setStyleSheet(BTN_SEC)
+        rst_btn.clicked.connect(lambda: (r_sl.setValue(100), g_sl.setValue(100), b_sl.setValue(100)))
+        ok_btn = QPushButton("Close")
+        ok_btn.setStyleSheet(BTN_PRIMARY)
+        ok_btn.setFixedHeight(28)
+        ok_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(rst_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(ok_btn)
+        vl.addLayout(btn_row)
+
+        dlg.exec()
+
+    def _get_color_config(self) -> ColorTransConfig:
+        """Build ColorTransConfig from current UI state."""
+        return ColorTransConfig(
+            enabled=self.cc_enable.isChecked(),
+            reverse_enabled=self.cc_reverse.isChecked(),
+            yoff_strength=self.cc_yoff.value() / 100.0,
+            black_lift=self.cc_blift.value() / 1000.0,
+            brightness=self.cc_brightness.value() / 100.0,
+            contrast=self.cc_contrast.value() / 100.0,
+            gamma=self.cc_gamma.value() / 100.0,
+            lift=self.cc_lift.value() / 100.0,
+            gain=self.cc_gain.value() / 100.0,
+            hue=float(self.cc_hue.value()),
+            saturation=self.cc_sat.value(),
+            r_mult=self.cc_r.value() / 100.0,
+            g_mult=self.cc_g.value() / 100.0,
+            b_mult=self.cc_b.value() / 100.0,
+            glsl_shader=self.cc_glsl_row.path or "",
+        )
+
+    def _on_color_changed(self, _=None):
+        """Called when any color correction slider/checkbox changes."""
+        # Update RGB value label
+        r, g, b = self.cc_r.value() / 100.0, self.cc_g.value() / 100.0, self.cc_b.value() / 100.0
+        self._cc_rgb_btn.setText(f"R / G / B:  {r:.2f} / {g:.2f} / {b:.2f}")
+
+        # Mark preset as "Custom" if user is not loading a preset
+        if not self._cc_loading_preset:
+            idx = self.cc_preset_cb.findText("Custom")
+            if idx < 0:
+                self.cc_preset_cb.blockSignals(True)
+                self.cc_preset_cb.addItem("Custom")
+                self.cc_preset_cb.setCurrentText("Custom")
+                self.cc_preset_cb.blockSignals(False)
+            else:
+                self.cc_preset_cb.blockSignals(True)
+                self.cc_preset_cb.setCurrentIndex(idx)
+                self.cc_preset_cb.blockSignals(False)
+
+        # Persist color correction settings
+        self._cc_save_to_settings()
+
+        # Update player preview color filter
+        self._update_player_color_vf()
+        self._queue_preview()
+
+    def _update_player_color_vf(self):
+        """Build color filter string for preview and pass to PlayerController."""
+        cc = self._get_color_config()
+        if cc.enabled or (cc.glsl_shader and os.path.isfile(cc.glsl_shader)):
+            import tempfile
+            from video_processor import _build_color_vf
+            ffmpeg = find_ffmpeg()
+            if ffmpeg:
+                tmp = tempfile.gettempdir()
+                vf = _build_color_vf(cc, ffmpeg, tmp)
+                self._player_panel.controller.set_color_vf(vf)
+                return
+        self._player_panel.controller.set_color_vf("")
+
+    def _cc_browse_glsl(self):
+        p, _ = QFileDialog.getOpenFileName(self, "Select GLSL Shader", "",
+                                            "GLSL Shaders (*.glsl *.hook)")
+        if p:
+            self.cc_glsl_row.set_path(p)
+            # Check libplacebo availability
+            ffmpeg = find_ffmpeg()
+            if ffmpeg and not detect_libplacebo(ffmpeg):
+                self._cc_glsl_warn.setText(
+                    "Your FFmpeg lacks libplacebo — GLSL shader will be skipped.\n"
+                    "Built-in LUT correction still works.")
+                self._cc_glsl_warn.setVisible(True)
+            else:
+                self._cc_glsl_warn.setVisible(False)
+            self._on_color_changed()
+
+    def _cc_scan_presets(self):
+        """Scan preset directories and populate combo."""
+        self._cc_presets.clear()
+        self.cc_preset_cb.blockSignals(True)
+        self.cc_preset_cb.clear()
+
+        # Built-in presets
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+        builtin = os.path.join(app_dir, "presets")
+
+        # User presets (AppData on Windows, ~/.config on Linux)
+        if sys.platform == "win32":
+            user_dir = os.path.join(os.environ.get("APPDATA", ""), "VueOSD", "presets")
+        else:
+            user_dir = os.path.join(os.path.expanduser("~"), ".config", "VueOSD", "presets")
+
+        for folder in [builtin, user_dir]:
+            if not os.path.isdir(folder):
+                continue
+            for f in sorted(os.listdir(folder)):
+                if not f.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(folder, f)) as fh:
+                        data = json.load(fh)
+                    name = data.get("name", os.path.splitext(f)[0])
+                    self._cc_presets[name] = data
+                except Exception:
+                    pass
+
+        for name in self._cc_presets:
+            self.cc_preset_cb.addItem(name)
+        self.cc_preset_cb.blockSignals(False)
+
+    def _on_cc_preset_changed(self, idx):
+        name = self.cc_preset_cb.currentText()
+        if name == "Custom" or name not in self._cc_presets:
+            return
+        data = self._cc_presets[name]
+        self._cc_loading_preset = True
+        try:
+            self.cc_reverse.setChecked(data.get("reverse_enabled", True))
+            self.cc_yoff.setValue(int(data.get("yoff_strength", 0.25) * 100))
+            self.cc_blift.setValue(int(data.get("black_lift", 0.02) * 1000))
+            self.cc_brightness.setValue(int(data.get("brightness", 0.0) * 100))
+            self.cc_contrast.setValue(int(data.get("contrast", 1.0) * 100))
+            self.cc_gamma.setValue(int(data.get("gamma", 1.0) * 100))
+            self.cc_lift.setValue(int(data.get("lift", -0.15) * 100))
+            self.cc_gain.setValue(int(data.get("gain", 1.75) * 100))
+            self.cc_hue.setValue(int(data.get("hue", 0.0)))
+            self.cc_sat.setValue(int(data.get("saturation", -22.5)))
+            self.cc_r.setValue(int(data.get("r_mult", 1.0) * 100))
+            self.cc_g.setValue(int(data.get("g_mult", 1.0) * 100))
+            self.cc_b.setValue(int(data.get("b_mult", 1.0) * 100))
+            glsl = data.get("glsl_shader", "")
+            if glsl and os.path.isfile(glsl):
+                self.cc_glsl_row.set_path(glsl)
+            else:
+                self.cc_glsl_row.set_path("")
+        finally:
+            self._cc_loading_preset = False
+        # Update RGB label and trigger preview
+        self._on_color_changed()
+
+    def _cc_save_preset(self):
+        name, ok = QFileDialog.getSaveFileName(
+            self, "Save Color Preset", "", "JSON (*.json)")
+        if not name or not ok:
+            return
+        if not name.endswith(".json"):
+            name += ".json"
+        cc = self._get_color_config()
+        data = {
+            "name": os.path.splitext(os.path.basename(name))[0],
+            "reverse_enabled": cc.reverse_enabled,
+            "yoff_strength": cc.yoff_strength,
+            "black_lift": cc.black_lift,
+            "brightness": cc.brightness,
+            "contrast": cc.contrast,
+            "gamma": cc.gamma,
+            "lift": cc.lift,
+            "gain": cc.gain,
+            "hue": cc.hue,
+            "saturation": cc.saturation,
+            "r_mult": cc.r_mult,
+            "g_mult": cc.g_mult,
+            "b_mult": cc.b_mult,
+            "glsl_shader": cc.glsl_shader,
+        }
+        try:
+            os.makedirs(os.path.dirname(name), exist_ok=True)
+            with open(name, "w") as f:
+                json.dump(data, f, indent=2)
+            self._cc_scan_presets()
+            self._st(f"Preset saved: {os.path.basename(name)}")
+        except Exception as e:
+            self._st(f"Failed to save preset: {e}")
+
+    def _cc_reset_defaults(self):
+        """Reset all color correction sliders to OpenIPC defaults."""
+        self._cc_loading_preset = True
+        try:
+            self.cc_reverse.setChecked(True)
+            self.cc_yoff.setValue(25)
+            self.cc_blift.setValue(20)
+            self.cc_brightness.setValue(0)
+            self.cc_contrast.setValue(100)
+            self.cc_gamma.setValue(100)
+            self.cc_lift.setValue(-15)
+            self.cc_gain.setValue(175)
+            self.cc_hue.setValue(0)
+            self.cc_sat.setValue(-22)
+            self.cc_r.setValue(100)
+            self.cc_g.setValue(100)
+            self.cc_b.setValue(100)
+            self.cc_glsl_row.set_path("")
+            self._cc_glsl_warn.setVisible(False)
+        finally:
+            self._cc_loading_preset = False
+        # Select OpenIPC Default preset if it exists
+        idx = self.cc_preset_cb.findText("OpenIPC Default")
+        if idx >= 0:
+            self.cc_preset_cb.blockSignals(True)
+            self.cc_preset_cb.setCurrentIndex(idx)
+            self.cc_preset_cb.blockSignals(False)
+        self._on_color_changed()
+
+    def _cc_save_to_settings(self):
+        """Persist current color correction state to settings.json."""
+        cc = self._get_color_config()
+        ct_data = {
+            "enabled": cc.enabled,
+            "reverse_enabled": cc.reverse_enabled,
+            "yoff_strength": cc.yoff_strength,
+            "black_lift": cc.black_lift,
+            "brightness": cc.brightness,
+            "contrast": cc.contrast,
+            "gamma": cc.gamma,
+            "lift": cc.lift,
+            "gain": cc.gain,
+            "hue": cc.hue,
+            "saturation": cc.saturation,
+            "r_mult": cc.r_mult,
+            "g_mult": cc.g_mult,
+            "b_mult": cc.b_mult,
+            "glsl_shader": cc.glsl_shader,
+            "preset": self.cc_preset_cb.currentText(),
+        }
+        _save_settings(colortrans=ct_data)
+
+    def _cc_restore_from_settings(self):
+        """Restore color correction state from settings.json on startup."""
+        ct = _COLORTRANS_SETTINGS
+        if not ct:
+            return
+        self._cc_loading_preset = True
+        try:
+            self.cc_enable.setChecked(ct.get("enabled", False))
+            self.cc_reverse.setChecked(ct.get("reverse_enabled", True))
+            self.cc_yoff.setValue(int(ct.get("yoff_strength", 0.25) * 100))
+            self.cc_blift.setValue(int(ct.get("black_lift", 0.02) * 1000))
+            self.cc_brightness.setValue(int(ct.get("brightness", 0.0) * 100))
+            self.cc_contrast.setValue(int(ct.get("contrast", 1.0) * 100))
+            self.cc_gamma.setValue(int(ct.get("gamma", 1.0) * 100))
+            self.cc_lift.setValue(int(ct.get("lift", -0.15) * 100))
+            self.cc_gain.setValue(int(ct.get("gain", 1.75) * 100))
+            self.cc_hue.setValue(int(ct.get("hue", 0.0)))
+            self.cc_sat.setValue(int(ct.get("saturation", -22.5)))
+            self.cc_r.setValue(int(ct.get("r_mult", 1.0) * 100))
+            self.cc_g.setValue(int(ct.get("g_mult", 1.0) * 100))
+            self.cc_b.setValue(int(ct.get("b_mult", 1.0) * 100))
+            glsl = ct.get("glsl_shader", "")
+            if glsl and os.path.isfile(glsl):
+                self.cc_glsl_row.set_path(glsl)
+            preset = ct.get("preset", "")
+            if preset:
+                idx = self.cc_preset_cb.findText(preset)
+                if idx >= 0:
+                    self.cc_preset_cb.setCurrentIndex(idx)
+        finally:
+            self._cc_loading_preset = False
+        # Update RGB label
+        r, g, b = self.cc_r.value() / 100.0, self.cc_g.value() / 100.0, self.cc_b.value() / 100.0
+        self._cc_rgb_btn.setText(f"R / G / B:  {r:.2f} / {g:.2f} / {b:.2f}")
 
     # ── Trim ─────────────────────────────────────────────────────────────────
 
@@ -2021,6 +2501,7 @@ class MainWindow(QMainWindow):
             upscale_target = upscale_target,
             osd_offset_ms = self.osd_offset_sb.value(),
             srt_enabled_fields = self.srt_fields_combo.checked_keys(),
+            color_config = self._get_color_config() if self.cc_enable.isChecked() else None,
         )
 
         self.render_btn.setEnabled(False)

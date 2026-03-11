@@ -1,0 +1,17 @@
+{
+  "name": "Neutral",
+  "reverse_enabled": false,
+  "yoff_strength": 0.0,
+  "black_lift": 0.0,
+  "brightness": 0.0,
+  "contrast": 1.0,
+  "gamma": 1.0,
+  "lift": 0.0,
+  "gain": 1.0,
+  "hue": 0.0,
+  "saturation": 0.0,
+  "r_mult": 1.0,
+  "g_mult": 1.0,
+  "b_mult": 1.0,
+  "glsl_shader": ""
+}
