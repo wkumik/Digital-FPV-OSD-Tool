@@ -51,6 +51,189 @@ from font_loader  import load_font
 
 
 @dataclass
+class ColorTransConfig:
+    """Color correction parameters — reverse camera color matrix + grading."""
+    enabled: bool = False
+    # Reverse ColorTrans
+    reverse_enabled: bool = True
+    yoff_strength: float = 0.25      # 0.0–1.0
+    black_lift: float = 0.020        # 0.0–0.1
+    # Grading
+    brightness: float = 0.0          # -1.0–1.0
+    contrast: float = 1.0            # 0.0–3.0
+    gamma: float = 1.0               # 0.1–3.0
+    lift: float = -0.15              # -1.0–1.0
+    gain: float = 1.75               # 0.0–5.0
+    hue: float = 0.0                 # -180–180 degrees
+    saturation: float = -22.5        # -100–100 (mpv-style)
+    r_mult: float = 1.0              # 0.0–4.0
+    g_mult: float = 1.0
+    b_mult: float = 1.0
+    # Custom GLSL shader (optional, path or empty)
+    glsl_shader: str = ""
+
+
+# ── 3D LUT generation ────────────────────────────────────────────────────────
+
+import numpy as np
+import hashlib
+
+# Precomputed BT.709 inverse color matrix rows (from HLSL shader)
+_INV_ROW0 = np.array([1.17866031,  0.17460893,  0.01571472])
+_INV_ROW1 = np.array([-0.11147506, 1.55408099, -0.07362197])
+_INV_ROW2 = np.array([0.03243649,  0.11275820,  1.22378927])
+
+_lut_cache_hash: Optional[str] = None
+_lut_cache_path: Optional[str] = None
+
+
+def _colortrans_hash(cc: ColorTransConfig) -> str:
+    """Hash config values to detect when LUT needs regeneration."""
+    vals = (cc.reverse_enabled, cc.yoff_strength, cc.black_lift,
+            cc.brightness, cc.contrast, cc.gamma, cc.lift, cc.gain,
+            cc.hue, cc.saturation, cc.r_mult, cc.g_mult, cc.b_mult)
+    return hashlib.md5(repr(vals).encode()).hexdigest()
+
+
+def generate_colortrans_lut(cc: ColorTransConfig, path: str) -> str:
+    """Generate a 65^3 .cube 3D LUT file from ColorTransConfig. Returns path."""
+    global _lut_cache_hash, _lut_cache_path
+    h = _colortrans_hash(cc)
+    if h == _lut_cache_hash and _lut_cache_path and os.path.exists(_lut_cache_path):
+        # If the caller wants the file at a different path, copy it there
+        if os.path.normpath(_lut_cache_path) != os.path.normpath(path):
+            import shutil
+            os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
+            shutil.copy2(_lut_cache_path, path)
+        return path
+
+    N = 33
+    lin = np.linspace(0.0, 1.0, N, dtype=np.float32)
+    # Create Nx Nx N x 3 grid
+    B, G, R = np.meshgrid(lin, lin, lin, indexing='ij')
+    rgb = np.stack([R, G, B], axis=-1).reshape(-1, 3)
+
+    # Stage 1: Reverse ColorTrans
+    if cc.reverse_enabled:
+        yoff = (200.0 / 1023.0) * cc.yoff_strength
+        rgb = rgb - yoff
+        out = np.empty_like(rgb)
+        out[:, 0] = rgb @ _INV_ROW0
+        out[:, 1] = rgb @ _INV_ROW1
+        out[:, 2] = rgb @ _INV_ROW2
+        rgb = out + cc.black_lift
+
+    # Stage 2: Grading
+    rgb = np.clip(rgb, 0.0, 1.0)
+
+    # Gamma
+    g = np.clip(cc.gamma, 0.1, 5.0)
+    if abs(g - 1.0) > 1e-6:
+        rgb = np.power(rgb, g)
+
+    # Brightness (-1..1 additive)
+    if abs(cc.brightness) > 1e-6:
+        rgb = rgb + cc.brightness
+
+    # Contrast (multiply around 0.5)
+    if abs(cc.contrast - 1.0) > 1e-6:
+        rgb = (rgb - 0.5) * cc.contrast + 0.5
+
+    # Lift (additive, matching HLSL)
+    lv = np.clip(cc.lift, -1.0, 1.0)
+    if abs(lv) > 1e-6:
+        rgb = rgb + lv
+
+    # Gain (multiplicative)
+    kv = np.clip(cc.gain, 0.0, 10.0)
+    if abs(kv - 1.0) > 1e-6:
+        rgb = rgb * kv
+
+    # RGB multipliers
+    mult = np.clip([cc.r_mult, cc.g_mult, cc.b_mult], 0.0, 4.0).astype(np.float32)
+    if not np.allclose(mult, 1.0):
+        rgb = rgb * mult[np.newaxis, :]
+
+    # Hue rotation (degrees)
+    if abs(cc.hue) > 0.1:
+        angle = np.radians(cc.hue)
+        cos_a, sin_a = np.cos(angle), np.sin(angle)
+        # Rotate in YIQ-like space
+        mat = np.array([
+            [0.2126 + 0.7874 * cos_a + 0.2126 * sin_a,
+             0.7152 - 0.7152 * cos_a + 0.7152 * sin_a,
+             0.0722 - 0.0722 * cos_a - 0.9278 * sin_a],
+            [0.2126 - 0.2126 * cos_a - 0.5251 * sin_a,
+             0.7152 + 0.2848 * cos_a + 0.1403 * sin_a,
+             0.0722 - 0.0722 * cos_a + 0.3848 * sin_a],
+            [0.2126 - 0.2126 * cos_a + 0.3722 * sin_a,
+             0.7152 - 0.7152 * cos_a - 0.5765 * sin_a,
+             0.0722 + 0.9278 * cos_a + 0.2043 * sin_a],
+        ], dtype=np.float32)
+        rgb = rgb @ mat.T
+
+    # Saturation (mpv-style: -100..+100 → 0..2 multiplier)
+    sat = 1.0 + cc.saturation / 100.0
+    sat = np.clip(sat, 0.0, 3.0)
+    if abs(sat - 1.0) > 1e-4:
+        luma = rgb @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+        rgb = luma[:, np.newaxis] + sat * (rgb - luma[:, np.newaxis])
+
+    rgb = np.clip(rgb, 0.0, 1.0)
+
+    # Write .cube file — batch string join for speed (~200ms for 33^3)
+    with open(path, 'wb') as f:
+        f.write(f"# VueOSD ColorTrans LUT\nLUT_3D_SIZE {N}\n".encode())
+        lines = [f"{r:.6f} {g:.6f} {b:.6f}" for r, g, b in rgb]
+        f.write(("\n".join(lines) + "\n").encode())
+
+    _lut_cache_hash = h
+    _lut_cache_path = path
+    return path
+
+
+# ── libplacebo detection ──────────────────────────────────────────────────────
+
+_libplacebo_cache: Optional[bool] = None
+
+
+def detect_libplacebo(ffmpeg_path: str) -> bool:
+    """Check if FFmpeg was built with libplacebo filter support. Cached."""
+    global _libplacebo_cache
+    if _libplacebo_cache is not None:
+        return _libplacebo_cache
+    try:
+        _, out, _ = _run_with_hard_timeout(
+            [ffmpeg_path, "-filters", "-hide_banner"], timeout_s=8)
+        _libplacebo_cache = "libplacebo" in out.decode("utf-8", errors="replace")
+    except Exception:
+        _libplacebo_cache = False
+    return _libplacebo_cache
+
+
+def _build_color_vf(cc: ColorTransConfig, ffmpeg_path: str, tmp_dir: str) -> str:
+    """Build video filter string for color correction. Returns '' if nothing to apply."""
+    parts = []
+
+    def _esc(p):
+        """Escape a file path for FFmpeg filter graph syntax."""
+        return p.replace("\\", "/").replace(":", "\\:")
+
+    # GLSL shader via libplacebo (applied first)
+    if cc.glsl_shader and os.path.isfile(cc.glsl_shader):
+        if detect_libplacebo(ffmpeg_path):
+            parts.append(f"libplacebo=custom_shader_path='{_esc(cc.glsl_shader)}'")
+
+    # Built-in LUT
+    if cc.enabled:
+        lut_path = os.path.join(tmp_dir, "colortrans.cube")
+        generate_colortrans_lut(cc, lut_path)
+        parts.append(f"lut3d=file='{_esc(lut_path)}'")
+
+    return ",".join(parts)
+
+
+@dataclass
 class ProcessingConfig:
     input_video:  str
     output_video: str
@@ -75,6 +258,8 @@ class ProcessingConfig:
     osd_data:      object = None  # pre-parsed OsdFile (e.g. P1 embedded OSD)
     osd_offset_ms: int   = 0     # Manual OSD sync offset (ms); positive = OSD forward
     srt_enabled_fields: Optional[set] = None  # SRT field keys to show; None = all
+    color_config: Optional[ColorTransConfig] = None  # Color correction settings
+    transparent_export: bool = False  # Export OSD-only with alpha (ProRes 4444 .mov)
 
 
 # ── GPU encoder detection ─────────────────────────────────────────────────────
@@ -466,6 +651,15 @@ def process_video(
     quality_args, preset_args, pix_fmt_args = _build_quality_args(encoder, config, use_vaapi)
 
     # ── Choose pipeline ────────────────────────────────────────────────────────
+
+    # Transparent overlay export: OSD frames → ProRes 4444 with alpha, no source video decode
+    if config.transparent_export:
+        if osd_data is None and srt_data is None:
+            raise RuntimeError("Transparent export requires OSD data or SRT data — nothing to render.")
+        return _transparent_pipeline(
+            ffmpeg, config, osd_data, srt_data, font,
+            width, height, fps, duration, progress_callback)
+
     # Fast path: OSD overlay pipe — Python handles ONLY the OSD frames,
     # FFmpeg handles all video frame I/O natively in C.
     if font and osd_data:
@@ -486,17 +680,24 @@ def process_video(
 # ── Upscale target → filter string ───────────────────────────────────────────
 _UPSCALE_HEIGHTS = {"1440p": 1440, "2.7k": 1512, "4k": 2160}
 
-def _upscale_filter(target: str, fc_fmt, use_vaapi: bool) -> str:
-    """Build the filter_complex string for overlay + optional upscale."""
+def _upscale_filter(target: str, fc_fmt, use_vaapi: bool, color_vf: str = "") -> str:
+    """Build the filter_complex string for overlay + optional upscale.
+
+    color_vf: optional color correction filter(s) applied to [0:v] BEFORE overlay.
+    """
     h = _UPSCALE_HEIGHTS.get((target or "").lower())
+    # If color correction is active, apply it to source video before overlay
+    if color_vf:
+        src = f"[0:v]{color_vf}[cc];[cc]"
+    else:
+        src = "[0:v]"
     if use_vaapi:
-        # VAAPI: no format= node, hwupload instead
         if h:
-            return f"[0:v][1:v]overlay=shortest=1,scale=-2:{h}:flags=lanczos,hwupload[v]"
-        return "[0:v][1:v]overlay=shortest=1,hwupload[v]"
+            return f"{src}[1:v]overlay=shortest=1,scale=-2:{h}:flags=lanczos,hwupload[v]"
+        return f"{src}[1:v]overlay=shortest=1,hwupload[v]"
     if h:
-        return f"[0:v][1:v]overlay=shortest=1,scale=-2:{h}:flags=lanczos,format={fc_fmt}[v]"
-    return f"[0:v][1:v]overlay=shortest=1,format={fc_fmt}[v]"
+        return f"{src}[1:v]overlay=shortest=1,scale=-2:{h}:flags=lanczos,format={fc_fmt}[v]"
+    return f"{src}[1:v]overlay=shortest=1,format={fc_fmt}[v]"
 
 
 # ── Fast pipeline: OSD overlay ─────────────────────────────────────────────────
@@ -587,6 +788,14 @@ def _overlay_pipeline(
     else:
         _fc_fmt = "yuv420p"
 
+    # Color correction filter (applied to source video before overlay)
+    _color_vf = ""
+    _color_tmp = None
+    cc = config.color_config
+    if cc and (cc.enabled or (cc.glsl_shader and os.path.isfile(cc.glsl_shader))):
+        _color_tmp = tempfile.mkdtemp(prefix="vueosd_cc_")
+        _color_vf = _build_color_vf(cc, ffmpeg, _color_tmp)
+
     ffmpeg_cmd = (
         [ffmpeg, "-y"]
         + (["-vaapi_device", "/dev/dri/renderD128"] if use_vaapi else [])
@@ -601,7 +810,7 @@ def _overlay_pipeline(
         + ["-sws_flags", "lanczos+accurate_rnd+full_chroma_int"]
         # Overlay filter: OSD on top of source, optional upscale, then encode
         + ["-filter_complex",
-           (_upscale_filter(config.upscale_target, _fc_fmt, use_vaapi))]
+           (_upscale_filter(config.upscale_target, _fc_fmt, use_vaapi, _color_vf))]
         + ["-map", "[v]",
            "-map", "0:a:0?",
            "-c:v", encoder]
@@ -706,6 +915,141 @@ def _overlay_pipeline(
     return osd_trimmed_warning or True
 
 
+# ── Transparent overlay export (ProRes 4444 with alpha) ────────────────────────
+
+def _transparent_pipeline(
+    ffmpeg, config, osd_data, srt_data, font,
+    width, height, fps, duration, progress_callback,
+):
+    """
+    Render OSD+SRT frames with transparency → ProRes 4444 .mov (no source video composited).
+    Source video is still needed for dimensions, fps, duration, and PTS timestamps.
+    """
+    enc_label = "ProRes 4444"
+
+    render_cfg = OsdRenderConfig(
+        offset_x    = config.offset_x,
+        offset_y    = config.offset_y,
+        scale       = config.scale,
+        show_srt_bar= config.show_srt_bar,
+        srt_opacity = config.srt_opacity,
+        srt_scale   = config.srt_scale,
+    )
+    renderer = OsdRenderer(width, height, font, render_cfg)
+
+    # Trim window
+    _t_start = config.trim_start if config.trim_start > 0.01 else 0.0
+    _t_end   = config.trim_end   if config.trim_end   > 0.01 else duration
+    _t_dur   = max(0.001, _t_end - _t_start)
+
+    n_out_frames = max(1, int(_t_dur * fps))
+
+    # OSD availability check
+    osd_in_window = []
+    if osd_data:
+        t_start_ms = int(_t_start * 1000)
+        t_end_ms   = int(_t_end   * 1000)
+        osd_in_window = [fr for fr in osd_data.frames
+                         if t_start_ms <= fr.time_ms <= t_end_ms + 500]
+
+    osd_trimmed_warning = ""
+    if osd_data and not osd_in_window:
+        osd_trimmed_warning = "No OSD elements in trim window — rendered without OSD overlay"
+        if progress_callback:
+            progress_callback(0, f"⚠ {osd_trimmed_warning}")
+
+    if progress_callback:
+        progress_callback(5, f"{width}×{height} @ {fps}fps · {n_out_frames} frames · {enc_label}")
+
+    # PTS extraction for frame-accurate sync
+    pts_list = get_frame_pts(config.input_video, _t_start)
+    use_pts  = len(pts_list) >= n_out_frames
+
+    # FFmpeg command: rawvideo RGBA input → ProRes 4444 with alpha
+    ffmpeg_cmd = [
+        ffmpeg, "-y",
+        "-f", "rawvideo", "-pix_fmt", "rgba",
+        "-s", f"{width}x{height}",
+        "-r", str(fps),
+        "-i", "pipe:0",
+        "-c:v", "prores_ks",
+        "-profile:v", "4444",
+        "-pix_fmt", "yuva444p10le",
+        "-vendor", "apl0",
+        "-movflags", "+faststart",
+        "-an",
+        config.output_video,
+    ]
+
+    ffmpeg_proc = _hidden_popen(
+        ffmpeg_cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+
+    ffmpeg_stderr = [""]
+    threading.Thread(target=_drain, args=(ffmpeg_proc.stderr, ffmpeg_stderr),
+                     daemon=True).start()
+
+    # Render loop — same logic as _overlay_pipeline
+    _frame_cache: dict = {}
+    report_every = max(1, n_out_frames // 50)
+
+    try:
+        if osd_data and not osd_in_window and not srt_data:
+            # Nothing to render — single blank frame
+            ffmpeg_proc.stdin.write(bytes(renderer.composite(None, "")))
+        else:
+            for i in range(n_out_frames):
+                t_sec    = pts_list[i] if use_pts else i / fps
+                abs_t_ms = int((_t_start + t_sec) * 1000 + config.osd_offset_ms)
+
+                osd_frame = None
+                if osd_data and osd_in_window:
+                    osd_frame = osd_data.frame_at_time(abs_t_ms)
+
+                srt_text = ""
+                if srt_data and config.show_srt_bar:
+                    td = srt_data.get_data_at_time(abs_t_ms)
+                    if td:
+                        srt_text = td.status_line(config.srt_enabled_fields)
+
+                cache_key = (osd_frame.index if osd_frame else -1, srt_text)
+                if cache_key not in _frame_cache:
+                    if len(_frame_cache) >= _CACHE_MAX:
+                        del _frame_cache[next(iter(_frame_cache))]
+                    _frame_cache[cache_key] = bytes(
+                        renderer.composite(osd_frame, srt_text))
+
+                ffmpeg_proc.stdin.write(_frame_cache[cache_key])
+
+                if progress_callback and (i % report_every == 0 or i == n_out_frames - 1):
+                    pct = min(5 + int(i / n_out_frames * 85), 90)
+                    progress_callback(pct,
+                        f"Frame {i+1}/{n_out_frames}  ({abs_t_ms/1000:.1f}s)  [{enc_label}]")
+
+    except (BrokenPipeError, OSError) as exc:
+        import errno as _errno
+        if not isinstance(exc, BrokenPipeError) and getattr(exc, 'errno', None) != _errno.EINVAL:
+            raise
+    finally:
+        try:
+            ffmpeg_proc.stdin.close()
+        except Exception:
+            pass
+
+    if progress_callback:
+        progress_callback(92, f"Encoding…  [{enc_label}]")
+
+    ffmpeg_proc.wait()
+
+    if ffmpeg_proc.returncode not in (0, None):
+        err = ffmpeg_stderr[0]
+        raise RuntimeError(f"ProRes encode failed (exit {ffmpeg_proc.returncode}):\n{err[-2000:]}")
+
+    if progress_callback:
+        progress_callback(100, f"✓ Done  [{enc_label}]")
+
+    return osd_trimmed_warning or True
+
+
 # ── Fallback pipeline: SRT-only (no font loaded) ──────────────────────────────
 
 def _srt_only_pipeline(
@@ -727,8 +1071,18 @@ def _srt_only_pipeline(
     if progress_callback:
         progress_callback(5, f"{width}×{height} @ {fps}fps · SRT only · {enc_label}")
 
+    # Color correction for SRT-only pipeline (applied during decode)
+    _srt_color_vf = ""
+    _srt_color_tmp = None
+    cc = config.color_config
+    if cc and (cc.enabled or (cc.glsl_shader and os.path.isfile(cc.glsl_shader))):
+        _srt_color_tmp = tempfile.mkdtemp(prefix="vueosd_cc_")
+        _srt_color_vf = _build_color_vf(cc, ffmpeg, _srt_color_tmp)
+    _srt_vf_args = ["-vf", _srt_color_vf] if _srt_color_vf else []
+
     decode_cmd = ([ffmpeg, "-y"]
                   + _trim_ss + ["-i", config.input_video] + _trim_t
+                  + _srt_vf_args
                   + ["-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1"])
     srt_movflags = ["-movflags", "+faststart"]
     encode_cmd = ([ffmpeg, "-y",
@@ -800,8 +1154,17 @@ def _reencode_only(ffmpeg, config, progress_callback):
     _t_end   = config.trim_end   if config.trim_end   > 0.01 else 0.0
     _trim_ss = ["-ss", f"{_t_start:.3f}"] if _t_start > 0.01 else []
     _trim_to = ["-to", f"{_t_end:.3f}"]   if _t_end   > 0.01 else []
+    # Color correction for re-encode-only pipeline
+    _re_color_vf_args = []
+    cc = config.color_config
+    if cc and (cc.enabled or (cc.glsl_shader and os.path.isfile(cc.glsl_shader))):
+        _re_tmp = tempfile.mkdtemp(prefix="vueosd_cc_")
+        _re_color_vf = _build_color_vf(cc, ffmpeg, _re_tmp)
+        if _re_color_vf:
+            _re_color_vf_args = ["-vf", _re_color_vf]
     cmd = ([ffmpeg, "-y"] + _trim_ss + ["-i", config.input_video] + _trim_to
            + ["-sws_flags", "lanczos+accurate_rnd+full_chroma_int"]
+           + _re_color_vf_args
            + ["-c:v", config.codec, "-crf", str(config.crf),
               "-preset", config.preset,
               "-movflags", "+faststart",

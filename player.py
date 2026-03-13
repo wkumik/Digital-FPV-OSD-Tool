@@ -704,6 +704,7 @@ class PlayerController:
         self.video_fps = 60.0
         self.video_w = 0
         self.video_h = 0
+        self._color_vf = ""   # color correction video filter string
 
         # Cache
         self.cached_frames = {}   # pct -> PIL Image
@@ -769,6 +770,21 @@ class PlayerController:
         self.transport.stepFwdClicked.connect(lambda: self.step_forward(1))
 
     # ── Video loading ─────────────────────────────────────────────────────────
+
+    def set_color_vf(self, vf: str):
+        """Set color correction video filter for preview extraction.
+
+        When set, the filter is prepended to -vf in all FFmpeg extract/play commands.
+        Pass "" to disable.
+        """
+        changed = getattr(self, '_color_vf', '') != vf
+        self._color_vf = vf
+        if changed and self.video_path:
+            # Invalidate cache and refresh
+            self.cached_frames.clear()
+            self.timeline.set_cached(set())
+            self._do_refresh()
+            self._start_prefetch()
 
     def load_video(self, path, duration, fps, width=0, height=0):
         """Called after video info is available."""
@@ -899,9 +915,11 @@ class PlayerController:
 
         def _run():
             try:
+                color_vf = getattr(self, '_color_vf', '')
+                vf_parts = [f for f in [color_vf, f"scale={scale_w}:{scale_h}"] if f]
                 proc = _hidden_popen(
                     [ffmpeg, "-ss", str(t), "-i", self.video_path,
-                     "-vf", f"scale={scale_w}:{scale_h}",
+                     "-vf", ",".join(vf_parts),
                      "-vframes", "1", "-f", "rawvideo", "-pix_fmt", "rgb24",
                      "-v", "quiet", "pipe:1"],
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -958,6 +976,7 @@ class PlayerController:
             return
         scale_w, scale_h = self._extraction_dims(1080)
         nbytes = scale_w * scale_h * 3
+        color_vf = getattr(self, '_color_vf', '')
 
         for pct in positions:
             if self._prefetch_stop:
@@ -966,9 +985,10 @@ class PlayerController:
                 continue
             t = self.video_dur * pct / _SL_MAX
             try:
+                vf_parts = [f for f in [color_vf, f"scale={scale_w}:{scale_h}"] if f]
                 proc = _hidden_popen(
                     [ffmpeg, "-ss", str(t), "-i", self.video_path,
-                     "-vf", f"scale={scale_w}:{scale_h}",
+                     "-vf", ",".join(vf_parts),
                      "-vframes", "1", "-f", "rawvideo", "-pix_fmt", "rgb24",
                      "-v", "quiet", "pipe:1"],
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -1010,11 +1030,13 @@ class PlayerController:
         self._playing = True
         self.transport.set_playing(True)
 
+        color_vf = getattr(self, '_color_vf', '')
+        vf_parts = [f for f in [color_vf, f"scale={scale_w}:{scale_h}"] if f]
         cmd = [
             ffmpeg,
             "-ss", str(seek_s),
             "-i", self.video_path,
-            "-vf", f"scale={scale_w}:{scale_h}",
+            "-vf", ",".join(vf_parts),
             "-f", "rawvideo",
             "-pix_fmt", "rgb24",
             "-an",
