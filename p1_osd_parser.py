@@ -37,8 +37,8 @@ import os
 
 P1_SEI_UUID = bytes.fromhex("bde945dcb748d9e620d82c96efee23d9")
 
-P1_GRID_COLS = 50
-P1_GRID_ROWS = 18
+P1_GRID_COLS = 53
+P1_GRID_ROWS = 20
 
 _SEGMENT_MAGIC = (0xb6, 0x03)
 
