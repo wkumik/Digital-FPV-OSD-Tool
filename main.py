@@ -59,7 +59,7 @@ _DARK_THEME = True   # module-level flag; toggled by the theme button
 
 # ─── Version & UI scale ───────────────────────────────────────────────────────
 
-VERSION = "1.4"
+VERSION = "1.6"
 
 _UI_SCALE = 1.0
 _SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -1303,11 +1303,11 @@ class MainWindow(QMainWindow):
         encgl.addWidget(_sep())
 
         # Transparent overlay export
-        self.transparent_check = QCheckBox("Transparent overlay (ProRes 4444)")
+        self.transparent_check = QCheckBox("Transparent overlay (VP9 alpha)")
         self.transparent_check.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
         self.transparent_check.setToolTip(
             "Export only the OSD glyphs and SRT bar as a video with\n"
-            "a transparent background (ProRes 4444 alpha, .mov).\n\n"
+            "a transparent background (VP9 alpha, .webm).\n\n"
             "Layer it on GoPro/action-cam footage in DaVinci Resolve,\n"
             "Premiere Pro, or Final Cut Pro."
         )
@@ -2315,7 +2315,7 @@ class MainWindow(QMainWindow):
             ts = ""
 
         if hasattr(self, 'transparent_check') and self.transparent_check.isChecked():
-            out_name = f"{stem}_overlay{ts}.mov"
+            out_name = f"{stem}_overlay{ts}.webm"
         else:
             out_name = f"{stem}_osd{ts}.mp4"
         return str(p.parent / out_name)
@@ -2488,7 +2488,7 @@ class MainWindow(QMainWindow):
             def _sa():
                 new_name = name_edit.text().strip()
                 if not new_name: return
-                _req_ext = ".mov" if self.transparent_check.isChecked() else ".mp4"
+                _req_ext = ".webm" if self.transparent_check.isChecked() else ".mp4"
                 if not new_name.lower().endswith(_req_ext):
                     new_name += _req_ext
                 new_path = os.path.join(os.path.dirname(out_path), new_name)
@@ -2519,10 +2519,10 @@ class MainWindow(QMainWindow):
         _upscale_map = {0: "", 1: "1440p", 2: "2.7k", 3: "4k"}
         upscale_target = _upscale_map.get(self.upscale_combo.currentIndex(), "")
 
-        # Force .mov extension for transparent export (ProRes 4444 needs MOV container)
+        # Force .webm extension for transparent export (VP9 alpha needs WebM container)
         _out_path = self.out_row.path
-        if self.transparent_check.isChecked() and not _out_path.lower().endswith(".mov"):
-            _out_path = str(Path(_out_path).with_suffix(".mov"))
+        if self.transparent_check.isChecked() and not _out_path.lower().endswith(".webm"):
+            _out_path = str(Path(_out_path).with_suffix(".webm"))
             self.out_row.set_path(_out_path)
 
         cfg = ProcessingConfig(

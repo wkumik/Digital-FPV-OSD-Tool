@@ -922,16 +922,16 @@ def _transparent_pipeline(
     width, height, fps, duration, progress_callback,
 ):
     """
-    Render OSD+SRT frames with transparency → ProRes 4444 .mov (no source video composited).
+    Render OSD+SRT frames with transparency → VP9 alpha .webm (no source video composited).
     Source video is still needed for dimensions, fps, duration, and PTS timestamps.
     """
-    # ProRes 4444 requires MOV container — force extension
+    # VP9 alpha requires WebM container — force extension
     out_path = config.output_video
-    if not out_path.lower().endswith(".mov"):
-        out_path = os.path.splitext(out_path)[0] + ".mov"
+    if not out_path.lower().endswith(".webm"):
+        out_path = os.path.splitext(out_path)[0] + ".webm"
         config.output_video = out_path
 
-    enc_label = "ProRes 4444"
+    enc_label = "VP9 alpha"
 
     render_cfg = OsdRenderConfig(
         offset_x    = config.offset_x,
@@ -971,18 +971,18 @@ def _transparent_pipeline(
     pts_list = get_frame_pts(config.input_video, _t_start)
     use_pts  = len(pts_list) >= n_out_frames
 
-    # FFmpeg command: rawvideo RGBA input → ProRes 4444 with alpha
+    # FFmpeg command: rawvideo RGBA input → VP9 with alpha
     ffmpeg_cmd = [
         ffmpeg, "-y",
         "-f", "rawvideo", "-pix_fmt", "rgba",
         "-s", f"{width}x{height}",
         "-r", str(fps),
         "-i", "pipe:0",
-        "-c:v", "prores_ks",
-        "-profile:v", "4444",
-        "-pix_fmt", "yuva444p10le",
-        "-vendor", "apl0",
-        "-movflags", "+faststart",
+        "-c:v", "libvpx-vp9",
+        "-pix_fmt", "yuva420p",
+        "-b:v", "0", "-crf", "18",
+        "-deadline", "good", "-cpu-used", "4",
+        "-auto-alt-ref", "0",
         "-an",
         config.output_video,
     ]
