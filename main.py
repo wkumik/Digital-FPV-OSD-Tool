@@ -1905,7 +1905,6 @@ class MainWindow(QMainWindow):
             srt_text     = srt_text,
             srt_opacity  = self.srt_opacity_sl.value() / 100.0,
             srt_scale    = self.srt_size_sl.value() / 100.0,
-            video_h      = ctrl.video_h,
         )
         if self.font_obj and PIL_OK:
             return render_osd_frame(img, osd_frame, self.font_obj, cfg)
@@ -1934,7 +1933,6 @@ class MainWindow(QMainWindow):
             srt_text     = srt_text,
             srt_opacity  = self.srt_opacity_sl.value() / 100.0,
             srt_scale    = self.srt_size_sl.value() / 100.0,
-            video_h      = ctrl.video_h,
         )
         canvas = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
         if self.font_obj and PIL_OK:
