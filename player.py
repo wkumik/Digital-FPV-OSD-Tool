@@ -83,7 +83,8 @@ class VideoCanvas(QWidget):
         self._fs = fs_fn
         self.setMinimumSize(320, 180)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self._base_pil = None     # full-res video frame (PIL, no OSD)
+        self._raw_pil = None      # original video frame before LUT (PIL)
+        self._base_pil = None     # full-res video frame after LUT (PIL, no OSD)
         self._base_pixmap = None  # base resized to canvas (QPixmap, cached)
         self._osd_pixmap = None   # transparent OSD overlay (QPixmap)
         self._donate_rects = []
@@ -92,13 +93,31 @@ class VideoCanvas(QWidget):
 
     # ── public API ────────────────────────────────────────────────────────────
 
-    def set_base_frame(self, pil_img):
-        """Cache a video-only frame. Resizes to canvas and stores as QPixmap."""
+    def set_base_frame(self, pil_img, lut_array=None):
+        """Cache a video-only frame. Optionally apply LUT before display."""
         if not PIL_OK or pil_img is None:
             return
         self._show_placeholder = False
-        self._base_pil = pil_img.convert("RGBA") if pil_img.mode != "RGBA" else pil_img
+        raw = pil_img.convert("RGBA") if pil_img.mode != "RGBA" else pil_img
+        self._raw_pil = raw
+        if lut_array is not None:
+            from video_processor import apply_lut_to_image
+            self._base_pil = apply_lut_to_image(raw, lut_array)
+        else:
+            self._base_pil = raw
         self._donate_rects = []
+        self._rebuild_base()
+        self.update()
+
+    def apply_color_lut(self, lut_array):
+        """Re-apply a LUT to the stored raw frame without re-extracting."""
+        if self._raw_pil is None:
+            return
+        if lut_array is not None:
+            from video_processor import apply_lut_to_image
+            self._base_pil = apply_lut_to_image(self._raw_pil, lut_array)
+        else:
+            self._base_pil = self._raw_pil
         self._rebuild_base()
         self.update()
 
@@ -122,6 +141,7 @@ class VideoCanvas(QWidget):
             return
         self._show_placeholder = False
         self._base_pil = pil_img.convert("RGBA") if pil_img.mode != "RGBA" else pil_img
+        self._raw_pil = self._base_pil
         self._osd_pixmap = None
         self._donate_rects = []
         self._rebuild_base()
@@ -129,6 +149,7 @@ class VideoCanvas(QWidget):
 
     def set_placeholder(self):
         """Show the Quick Start placeholder."""
+        self._raw_pil = None
         self._base_pil = None
         self._base_pixmap = None
         self._osd_pixmap = None
@@ -705,6 +726,8 @@ class PlayerController:
         self.video_w = 0
         self.video_h = 0
         self._color_vf = ""   # color correction video filter string
+        self._color_vf_hash = ""  # hash for detecting actual changes
+        self._color_lut = None    # NumPy LUT array for instant preview
 
         # Cache
         self.cached_frames = {}   # pct -> PIL Image
@@ -760,6 +783,12 @@ class PlayerController:
         self._preview_timer.setInterval(30)
         self._preview_timer.timeout.connect(self._do_refresh)
 
+        # Color filter re-extraction debounce (300ms — waits for slider to settle)
+        self._color_extract_timer = QTimer()
+        self._color_extract_timer.setSingleShot(True)
+        self._color_extract_timer.setInterval(300)
+        self._color_extract_timer.timeout.connect(self._do_color_extract)
+
         # Wire signals
         self.timeline.seekRequested.connect(self._on_seek)
         self.canvas.resized.connect(self._on_canvas_resized)
@@ -771,19 +800,33 @@ class PlayerController:
 
     # ── Video loading ─────────────────────────────────────────────────────────
 
-    def set_color_vf(self, vf: str):
-        """Set color correction video filter for preview extraction.
+    def set_color_vf(self, vf: str, vf_hash: str = ""):
+        """Set color correction video filter for playback pipe.
 
-        When set, the filter is prepended to -vf in all FFmpeg extract/play commands.
-        Pass "" to disable.
+        Uses hash to detect actual changes (the file path in the vf string
+        doesn't change — only file contents do).
         """
-        changed = getattr(self, '_color_vf', '') != vf
+        changed = vf_hash != self._color_vf_hash if vf_hash else (vf != self._color_vf)
         self._color_vf = vf
+        self._color_vf_hash = vf_hash
         if changed and self.video_path:
-            # Invalidate cache and refresh
+            # Invalidate cache for playback path
             self.cached_frames.clear()
             self.timeline.set_cached(set())
-            self._do_refresh()
+            # Re-extract raw frames (LUT applied in Python)
+            self._color_extract_timer.start()
+
+    def set_color_lut(self, lut_array):
+        """Set LUT for instant Python-side preview. No FFmpeg needed."""
+        self._color_lut = lut_array
+        if self.video_path:
+            self.canvas.apply_color_lut(lut_array)
+
+    def _do_color_extract(self):
+        """Re-extract current frame with updated color filter (debounced)."""
+        if self.video_path:
+            pct = int(self.timeline._position * _SL_MAX)
+            self._extract_at_pct(pct)
             self._start_prefetch()
 
     def load_video(self, path, duration, fps, width=0, height=0):
@@ -915,8 +958,7 @@ class PlayerController:
 
         def _run():
             try:
-                color_vf = getattr(self, '_color_vf', '')
-                vf_parts = [f for f in [color_vf, f"scale={scale_w}:{scale_h}"] if f]
+                vf_parts = [f"scale={scale_w}:{scale_h}"]
                 proc = _hidden_popen(
                     [ffmpeg, "-ss", str(t), "-i", self.video_path,
                      "-vf", ",".join(vf_parts),
@@ -950,7 +992,7 @@ class PlayerController:
         img = self.cached_frames.get(pct)
         if img is None:
             return
-        self.canvas.set_base_frame(img)
+        self.canvas.set_base_frame(img, self._color_lut)
         self._update_osd(pct)
 
     def _update_time_labels(self, pct):
@@ -976,7 +1018,6 @@ class PlayerController:
             return
         scale_w, scale_h = self._extraction_dims(1080)
         nbytes = scale_w * scale_h * 3
-        color_vf = getattr(self, '_color_vf', '')
 
         for pct in positions:
             if self._prefetch_stop:
@@ -985,7 +1026,7 @@ class PlayerController:
                 continue
             t = self.video_dur * pct / _SL_MAX
             try:
-                vf_parts = [f for f in [color_vf, f"scale={scale_w}:{scale_h}"] if f]
+                vf_parts = [f"scale={scale_w}:{scale_h}"]
                 proc = _hidden_popen(
                     [ffmpeg, "-ss", str(t), "-i", self.video_path,
                      "-vf", ",".join(vf_parts),

@@ -2060,18 +2060,28 @@ class MainWindow(QMainWindow):
         self._queue_preview()
 
     def _update_player_color_vf(self):
-        """Build color filter string for preview and pass to PlayerController."""
+        """Build color filter and instant LUT preview for PlayerController."""
         cc = self._get_color_config()
+        ctrl = self._player_panel.controller
+
+        # Instant preview via Python LUT (no FFmpeg needed)
+        if cc.enabled:
+            from video_processor import get_colortrans_lut_array
+            ctrl.set_color_lut(get_colortrans_lut_array(cc))
+        else:
+            ctrl.set_color_lut(None)
+
+        # FFmpeg filter for playback pipe and export
         if cc.enabled or (cc.glsl_shader and os.path.isfile(cc.glsl_shader)):
             import tempfile
-            from video_processor import _build_color_vf
+            from video_processor import _build_color_vf, _colortrans_hash
             ffmpeg = find_ffmpeg()
             if ffmpeg:
                 tmp = tempfile.gettempdir()
                 vf = _build_color_vf(cc, ffmpeg, tmp)
-                self._player_panel.controller.set_color_vf(vf)
+                ctrl.set_color_vf(vf, _colortrans_hash(cc))
                 return
-        self._player_panel.controller.set_color_vf("")
+        ctrl.set_color_vf("")
 
     def _cc_browse_glsl(self):
         p, _ = QFileDialog.getOpenFileName(self, "Select GLSL Shader", "",

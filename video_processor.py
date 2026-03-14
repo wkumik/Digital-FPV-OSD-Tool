@@ -85,6 +85,8 @@ _INV_ROW2 = np.array([0.03243649,  0.11275820,  1.22378927])
 
 _lut_cache_hash: Optional[str] = None
 _lut_cache_path: Optional[str] = None
+_lut_cache_array: Optional[np.ndarray] = None   # cached (33,33,33,3) float32
+_lut_array_hash: Optional[str] = None
 
 
 def _colortrans_hash(cc: ColorTransConfig) -> str:
@@ -95,21 +97,18 @@ def _colortrans_hash(cc: ColorTransConfig) -> str:
     return hashlib.md5(repr(vals).encode()).hexdigest()
 
 
-def generate_colortrans_lut(cc: ColorTransConfig, path: str) -> str:
-    """Generate a 65^3 .cube 3D LUT file from ColorTransConfig. Returns path."""
-    global _lut_cache_hash, _lut_cache_path
+def _compute_lut_array(cc: ColorTransConfig) -> np.ndarray:
+    """Compute a 33^3 3D LUT as NumPy array (shape (33,33,33,3) float32).
+
+    Cached via hash — returns same array if config unchanged.
+    """
+    global _lut_cache_array, _lut_array_hash
     h = _colortrans_hash(cc)
-    if h == _lut_cache_hash and _lut_cache_path and os.path.exists(_lut_cache_path):
-        # If the caller wants the file at a different path, copy it there
-        if os.path.normpath(_lut_cache_path) != os.path.normpath(path):
-            import shutil
-            os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
-            shutil.copy2(_lut_cache_path, path)
-        return path
+    if h == _lut_array_hash and _lut_cache_array is not None:
+        return _lut_cache_array
 
     N = 33
     lin = np.linspace(0.0, 1.0, N, dtype=np.float32)
-    # Create Nx Nx N x 3 grid
     B, G, R = np.meshgrid(lin, lin, lin, indexing='ij')
     rgb = np.stack([R, G, B], axis=-1).reshape(-1, 3)
 
@@ -126,39 +125,31 @@ def generate_colortrans_lut(cc: ColorTransConfig, path: str) -> str:
     # Stage 2: Grading
     rgb = np.clip(rgb, 0.0, 1.0)
 
-    # Gamma
     g = np.clip(cc.gamma, 0.1, 5.0)
     if abs(g - 1.0) > 1e-6:
         rgb = np.power(rgb, g)
 
-    # Brightness (-1..1 additive)
     if abs(cc.brightness) > 1e-6:
         rgb = rgb + cc.brightness
 
-    # Contrast (multiply around 0.5)
     if abs(cc.contrast - 1.0) > 1e-6:
         rgb = (rgb - 0.5) * cc.contrast + 0.5
 
-    # Lift (additive, matching HLSL)
     lv = np.clip(cc.lift, -1.0, 1.0)
     if abs(lv) > 1e-6:
         rgb = rgb + lv
 
-    # Gain (multiplicative)
     kv = np.clip(cc.gain, 0.0, 10.0)
     if abs(kv - 1.0) > 1e-6:
         rgb = rgb * kv
 
-    # RGB multipliers
     mult = np.clip([cc.r_mult, cc.g_mult, cc.b_mult], 0.0, 4.0).astype(np.float32)
     if not np.allclose(mult, 1.0):
         rgb = rgb * mult[np.newaxis, :]
 
-    # Hue rotation (degrees)
     if abs(cc.hue) > 0.1:
         angle = np.radians(cc.hue)
         cos_a, sin_a = np.cos(angle), np.sin(angle)
-        # Rotate in YIQ-like space
         mat = np.array([
             [0.2126 + 0.7874 * cos_a + 0.2126 * sin_a,
              0.7152 - 0.7152 * cos_a + 0.7152 * sin_a,
@@ -172,7 +163,6 @@ def generate_colortrans_lut(cc: ColorTransConfig, path: str) -> str:
         ], dtype=np.float32)
         rgb = rgb @ mat.T
 
-    # Saturation (mpv-style: -100..+100 → 0..2 multiplier)
     sat = 1.0 + cc.saturation / 100.0
     sat = np.clip(sat, 0.0, 3.0)
     if abs(sat - 1.0) > 1e-4:
@@ -180,8 +170,102 @@ def generate_colortrans_lut(cc: ColorTransConfig, path: str) -> str:
         rgb = luma[:, np.newaxis] + sat * (rgb - luma[:, np.newaxis])
 
     rgb = np.clip(rgb, 0.0, 1.0)
+    lut = rgb.reshape(N, N, N, 3)
 
-    # Write .cube file — batch string join for speed (~200ms for 33^3)
+    _lut_cache_array = lut
+    _lut_array_hash = h
+    return lut
+
+
+def get_colortrans_lut_array(cc: ColorTransConfig) -> np.ndarray:
+    """Return cached 33^3 LUT array for Python-side color correction preview."""
+    return _compute_lut_array(cc)
+
+
+def apply_lut_to_image(pil_img, lut_33: np.ndarray):
+    """Apply a 33^3 3D LUT to a PIL Image using trilinear interpolation.
+
+    Args:
+        pil_img: PIL Image (RGB or RGBA)
+        lut_33: ndarray shape (33,33,33,3) float32, indexed as lut[B,G,R]
+
+    Returns:
+        PIL Image with LUT applied (same mode as input)
+    """
+    has_alpha = pil_img.mode == "RGBA"
+    if has_alpha:
+        r, g, b, a = pil_img.split()
+        rgb_img = Image.merge("RGB", (r, g, b))
+    else:
+        rgb_img = pil_img.convert("RGB")
+        a = None
+
+    arr = np.asarray(rgb_img, dtype=np.float32) / 255.0  # (H, W, 3)
+    shape = arr.shape[:2]
+
+    # Scale to LUT index space [0, 32]
+    N = lut_33.shape[0] - 1  # 32
+    scaled = arr * N
+
+    # Floor/ceil indices
+    lo = np.floor(scaled).astype(np.int32)
+    lo = np.clip(lo, 0, N - 1)
+    hi = lo + 1
+    hi = np.clip(hi, 0, N)
+    frac = scaled - lo.astype(np.float32)  # fractional part
+
+    # Extract per-channel indices and fractions
+    r_lo, g_lo, b_lo = lo[..., 0], lo[..., 1], lo[..., 2]
+    r_hi, g_hi, b_hi = hi[..., 0], hi[..., 1], hi[..., 2]
+    r_f, g_f, b_f = frac[..., 0], frac[..., 1], frac[..., 2]
+
+    # 8 corner lookups — LUT indexed as [B, G, R]
+    c000 = lut_33[b_lo, g_lo, r_lo]
+    c001 = lut_33[b_lo, g_lo, r_hi]
+    c010 = lut_33[b_lo, g_hi, r_lo]
+    c011 = lut_33[b_lo, g_hi, r_hi]
+    c100 = lut_33[b_hi, g_lo, r_lo]
+    c101 = lut_33[b_hi, g_lo, r_hi]
+    c110 = lut_33[b_hi, g_hi, r_lo]
+    c111 = lut_33[b_hi, g_hi, r_hi]
+
+    # Trilinear interpolation
+    r_f = r_f[..., np.newaxis]
+    g_f = g_f[..., np.newaxis]
+    b_f = b_f[..., np.newaxis]
+
+    c00 = c000 * (1 - r_f) + c001 * r_f
+    c01 = c010 * (1 - r_f) + c011 * r_f
+    c10 = c100 * (1 - r_f) + c101 * r_f
+    c11 = c110 * (1 - r_f) + c111 * r_f
+
+    c0 = c00 * (1 - g_f) + c01 * g_f
+    c1 = c10 * (1 - g_f) + c11 * g_f
+
+    result = c0 * (1 - b_f) + c1 * b_f
+    result = np.clip(result * 255.0, 0, 255).astype(np.uint8)
+
+    out = Image.fromarray(result, "RGB")
+    if has_alpha and a is not None:
+        out.putalpha(a)
+    return out
+
+
+def generate_colortrans_lut(cc: ColorTransConfig, path: str) -> str:
+    """Generate a 33^3 .cube 3D LUT file from ColorTransConfig. Returns path."""
+    global _lut_cache_hash, _lut_cache_path
+    h = _colortrans_hash(cc)
+    if h == _lut_cache_hash and _lut_cache_path and os.path.exists(_lut_cache_path):
+        if os.path.normpath(_lut_cache_path) != os.path.normpath(path):
+            import shutil
+            os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
+            shutil.copy2(_lut_cache_path, path)
+        return path
+
+    lut = _compute_lut_array(cc)
+    N = lut.shape[0]
+    rgb = lut.reshape(-1, 3)
+
     with open(path, 'wb') as f:
         f.write(f"# VueOSD ColorTrans LUT\nLUT_3D_SIZE {N}\n".encode())
         lines = [f"{r:.6f} {g:.6f} {b:.6f}" for r, g, b in rgb]
@@ -385,22 +469,50 @@ def detect_hw_encoder(ffmpeg: str) -> Optional[dict]:
             continue
 
         if rc == 0:
-            _hw_probe_cache = {"name": name, "h264": h264,
-                               "h265": h265, "vaapi": "vaapi" in h264}
-            return _hw_probe_cache
+            h264_ok = True
+        else:
+            # Non-zero exit — inspect stderr
+            err_lo = err.decode("utf-8", errors="replace").lower()
+            if any(phrase in err_lo for phrase in _NO_DEVICE_PHRASES):
+                continue  # definitively no device — try next candidate
+            # Unknown failure but encoder IS compiled in and didn't say
+            # "no device" — treat H.264 as available (driver hiccup, etc.)
+            h264_ok = True
 
-        # Non-zero exit — inspect stderr
-        err_lo = err.decode("utf-8", errors="replace").lower()
-
-        if any(phrase in err_lo for phrase in _NO_DEVICE_PHRASES):
-            # Definitively no device of this type — try the next candidate
+        if not h264_ok:
             continue
 
-        # Unknown failure (wrong pix-fmt, minor driver issue, etc.).
-        # The encoder IS compiled in and didn't say "no device", so report it
-        # as available — the user's actual encode will likely work fine.
+        # Step 3: probe HEVC variant — some GPUs/drivers support H.264 but not HEVC
+        h265_ok = False
+        if h265 in compiled:
+            if "vaapi" in h265:
+                h265_cmd = [ffmpeg, "-y",
+                            "-vaapi_device", "/dev/dri/renderD128",
+                            "-f", "lavfi", "-i", "color=black:size=256x256:rate=30",
+                            "-frames:v", "1",
+                            "-vf", "format=nv12,hwupload",
+                            "-c:v", h265, "-f", "null", "-"]
+            elif "amf" in h265:
+                h265_cmd = [ffmpeg, "-y",
+                            "-f", "lavfi", "-i", "color=black:size=256x256:rate=30",
+                            "-frames:v", "1",
+                            "-c:v", h265, "-pix_fmt", "nv12",
+                            "-f", "null", "-"]
+            else:
+                h265_cmd = [ffmpeg, "-y",
+                            "-f", "lavfi", "-i", "color=black:size=256x256:rate=30",
+                            "-frames:v", "1",
+                            "-c:v", h265, "-pix_fmt", "yuv420p",
+                            "-f", "null", "-"]
+            try:
+                rc5, _, _ = _run_with_hard_timeout(h265_cmd, timeout_s=20)
+                h265_ok = (rc5 == 0)
+            except Exception:
+                pass
+
         _hw_probe_cache = {"name": name, "h264": h264,
-                           "h265": h265, "vaapi": "vaapi" in h264}
+                           "h265": h265 if h265_ok else None,
+                           "vaapi": "vaapi" in h264}
         return _hw_probe_cache
 
     _hw_probe_cache = {}  # definitive miss — cache so we never probe again
@@ -641,9 +753,12 @@ def process_video(
     use_vaapi = hw_info and hw_info.get("vaapi", False)
 
     if hw_info and config.use_hw:
-        codec_map = {"libx264": hw_info["h264"], "libx265": hw_info["h265"]}
-        encoder   = codec_map.get(config.codec, hw_info["h264"])
-        enc_label = f"{hw_info['name']} ({encoder})"
+        codec_map = {"libx264": hw_info["h264"]}
+        if hw_info.get("h265"):
+            codec_map["libx265"] = hw_info["h265"]
+        encoder   = codec_map.get(config.codec, config.codec)
+        is_hw     = encoder != config.codec
+        enc_label = f"{hw_info['name']} ({encoder})" if is_hw else f"CPU ({encoder})"
     else:
         encoder   = config.codec
         enc_label = f"CPU ({encoder})"
@@ -979,7 +1094,7 @@ def _transparent_pipeline(
         "-r", str(fps),
         "-i", "pipe:0",
         "-c:v", "libvpx-vp9",
-        "-pix_fmt", "yuva420p",
+        "-pix_fmt", "yuva444p",
         "-b:v", "0", "-crf", "18",
         "-deadline", "good", "-cpu-used", "4",
         "-auto-alt-ref", "0",
