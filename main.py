@@ -861,7 +861,7 @@ class MainWindow(QMainWindow):
         self.srt_opacity_sl = LabeledSlider("Opacity", 10, 100, 60, "%")
         self.srt_opacity_sl.valueChanged.connect(self._refresh_preview)
 
-        self.srt_size_sl = LabeledSlider("Size", 75, 200, 100, "%")
+        self.srt_size_sl = LabeledSlider("Size", 50, 200, 100, "%")
         self.srt_size_sl.valueChanged.connect(self._refresh_preview)
 
         _fields_lbl = QLabel("Visible fields:")
@@ -1890,7 +1890,8 @@ class MainWindow(QMainWindow):
 
     def _composite(self, img, pct):
         """Composite OSD + SRT onto a video frame at given slider position."""
-        t_ms     = self._player_panel.controller.pct_to_video_time_ms(pct) + self.osd_offset_sb.value()
+        ctrl = self._player_panel.controller
+        t_ms     = ctrl.pct_to_video_time_ms(pct) + self.osd_offset_sb.value()
         osd_frame = self.osd_data.frame_at_time(t_ms) if self.osd_data else None
         srt_text = ""
         if self.srt_data and self.srt_bar_check.isChecked():
@@ -1904,6 +1905,7 @@ class MainWindow(QMainWindow):
             srt_text     = srt_text,
             srt_opacity  = self.srt_opacity_sl.value() / 100.0,
             srt_scale    = self.srt_size_sl.value() / 100.0,
+            video_h      = ctrl.video_h,
         )
         if self.font_obj and PIL_OK:
             return render_osd_frame(img, osd_frame, self.font_obj, cfg)
@@ -1932,6 +1934,7 @@ class MainWindow(QMainWindow):
             srt_text     = srt_text,
             srt_opacity  = self.srt_opacity_sl.value() / 100.0,
             srt_scale    = self.srt_size_sl.value() / 100.0,
+            video_h      = ctrl.video_h,
         )
         canvas = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
         if self.font_obj and PIL_OK:

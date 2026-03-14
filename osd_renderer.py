@@ -41,7 +41,8 @@ class OsdRenderConfig:
     show_srt_bar:  bool  = True
     srt_text:      str   = ""
     srt_opacity:   float = 0.6   # SRT bar background opacity (0.0–1.0)
-    srt_scale:     float = 1.0   # SRT bar font/size multiplier (0.75–2.0)
+    srt_scale:     float = 1.0   # SRT bar font/size multiplier (0.5–2.0)
+    video_h:       int   = 0    # True video height for absolute SRT sizing
     osd_offset_ms: int   = 0     # Manual sync offset (ms); applied to timestamp lookups
 
 
@@ -90,7 +91,8 @@ def render_osd_frame(
             out.paste(glyph, (px, py), glyph)
 
     if cfg.show_srt_bar and cfg.srt_text:
-        _draw_srt_bar(out, cfg.srt_text, opacity=cfg.srt_opacity, scale=cfg.srt_scale)
+        _draw_srt_bar(out, cfg.srt_text, opacity=cfg.srt_opacity,
+                      scale=cfg.srt_scale, video_h=cfg.video_h)
 
     return out
 
@@ -116,19 +118,21 @@ def render_fallback(
             draw.text((px+1, py+1), label, font=pil_f, fill=(0,0,0,200))
             draw.text((px,   py  ), label, font=pil_f, fill=(255,255,0,220))
     if cfg.show_srt_bar and cfg.srt_text:
-        _draw_srt_bar(out, cfg.srt_text, opacity=cfg.srt_opacity, scale=cfg.srt_scale)
+        _draw_srt_bar(out, cfg.srt_text, opacity=cfg.srt_opacity,
+                      scale=cfg.srt_scale, video_h=cfg.video_h)
     return out
 
 
 def _draw_srt_bar(img: "Image.Image", text: str, opacity: float = 0.6,
-                  scale: float = 1.0, _cache: dict = {}):
+                  scale: float = 1.0, video_h: int = 0, _cache: dict = {}):
     """Draw SRT status bar onto a PIL image. Font is cached across calls.
 
     Draws on a separate transparent overlay then alpha_composites onto img so
     the output pixels are always fully opaque (alpha=255).  This prevents the
     UI theme background from bleeding through in the preview widget.
     """
-    fsize = max(14, int(img.height // 42 * scale))
+    ref_h = video_h if video_h > 0 else img.height
+    fsize = max(14, int(ref_h // 42 * scale))
     if fsize not in _cache:
         try:    _cache[fsize] = PILFont.truetype("arial.ttf", fsize)
         except: _cache[fsize] = PILFont.load_default()
