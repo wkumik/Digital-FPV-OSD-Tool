@@ -14,12 +14,15 @@ HUD elements directly onto the footage — frame-accurate, GPU-accelerated.
 - Frame-accurate OSD overlay
 - Betaflight, INAV & ArduPilot font support (SneakyFPV HD fonts included)
 - Firmware auto-detected from OSD file header
+- WTFOS / DJI O3 support (auto-detected 60×22 grid)
 - BetaFPV P1 embedded OSD support
 - Caddx Ascent OSD support
 - [Ruby FPV](https://rubyfpv.com/) support
 - [Onyx FPV](https://onyxfpv.com/) support
 - SRT telemetry bar (speed, altitude, satellites, signal)
-- GPU-accelerated encoding (NVIDIA NVENC, AMD AMF, Intel QSV)
+- GPU-accelerated encoding (NVIDIA NVENC, AMD AMF, Intel QSV) with automatic CPU fallback
+- ColorTrans color correction with LUT preview
+- Transparent overlay export (VP9 alpha)
 - Trim, scale, offset, opacity controls
 - Built-in video player with scrubbing, frame stepping and shuttle playback
 - Two-layer preview compositing (instant OSD/SRT slider response)
