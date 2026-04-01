@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from typing import Optional, List
 
 HEADER_SIZE     = 40
-GRID_COLS       = 53
+GRID_COLS       = 53       # default; overridden per-file when header supplies dims
 GRID_ROWS       = 20
 CHARS_PER_FRAME = GRID_COLS * GRID_ROWS   # 1060
 FRAME_SIZE      = 4 + CHARS_PER_FRAME * 2 # 2124  (u32 ts + 1060×u16)
@@ -68,16 +68,18 @@ class FlightStats:
 @dataclass
 class OsdFrame:
     """Complete snapshot of the MSP OSD screen at this timestamp."""
-    index:   int
-    time_ms: int
-    grid:    List[int]   # flat len=1060;  0 = transparent
+    index:     int
+    time_ms:   int
+    grid:      List[int]   # flat; 0 = transparent
+    grid_cols: int = GRID_COLS   # actual columns for this frame
 
     def char_at(self, row: int, col: int) -> int:
-        return self.grid[row * GRID_COLS + col]
+        return self.grid[row * self.grid_cols + col]
 
     def non_empty(self) -> list[tuple[int, int, int]]:
         """Return [(row, col, char_code), ...] for all visible (non-zero) cells."""
-        return [(i // GRID_COLS, i % GRID_COLS, c)
+        cols = self.grid_cols
+        return [(i // cols, i % cols, c)
                 for i, c in enumerate(self.grid) if c != 0]
 
 
@@ -86,6 +88,8 @@ class OsdFile:
     stats:      FlightStats       = field(default_factory=FlightStats)
     frames:     List[OsdFrame]    = field(default_factory=list)
     timestamps: List[int]         = field(default_factory=list)  # ms, ascending
+    grid_cols:  int               = GRID_COLS
+    grid_rows:  int               = GRID_ROWS
 
     @property
     def frame_count(self) -> int:
@@ -116,19 +120,20 @@ class OsdFile:
 def _clean(s: str) -> str:
     return re.sub(r'[^\x20-\x7E.]', '', s).strip()
 
-def _extract_stats(frame: OsdFrame) -> FlightStats:
+def _extract_stats(frame: OsdFrame, grid_cols: int = GRID_COLS,
+                    grid_rows: int = GRID_ROWS) -> FlightStats:
     """Read flight stats text from the first OSD frame (post-flight stats screen)."""
     s = FlightStats()
 
     def row_text(r: int) -> str:
-        row = frame.grid[r * GRID_COLS:(r + 1) * GRID_COLS]
+        row = frame.grid[r * grid_cols:(r + 1) * grid_cols]
         return ''.join(chr(c) if 32 <= c < 127 else ' ' for c in row)
 
     def after_colon(line: str) -> str:
         idx = line.find(':')
         return line[idx + 1:].strip() if idx >= 0 else ''
 
-    for r in range(GRID_ROWS):
+    for r in range(grid_rows):
         line = row_text(r)
         if ('TOTAL' in line and 'ARM' in line) or \
            ('FLY'   in line and 'TIME' in line) or \
@@ -179,21 +184,42 @@ def parse_osd(path: str) -> OsdFile:
         # Accept any 4-char ASCII tag — other systems may use different strings
         fc_type = fc_tag.decode('ascii', errors='replace').rstrip('\x00') or 'Unknown'
 
-    n_frames = (len(raw) - HEADER_SIZE) // FRAME_SIZE
+    # ── Detect grid dimensions from header ────────────────────────────────
+    # WTFOS / DJI O3 recordings store grid size at header bytes 36-39 as
+    # two little-endian u16 values (cols, rows).  The recording source tag
+    # (e.g. "DJO3") appears at bytes 32-35.  When present and valid, these
+    # override the default 53×20 grid.
+    grid_cols, grid_rows = GRID_COLS, GRID_ROWS
+    if len(raw) >= 40:
+        hdr_cols = struct.unpack_from('<H', raw, 36)[0]
+        hdr_rows = struct.unpack_from('<H', raw, 38)[0]
+        if 30 <= hdr_cols <= 120 and 10 <= hdr_rows <= 60:
+            # Sanity-check: the file must divide evenly with these dimensions
+            chars  = hdr_cols * hdr_rows
+            fsize  = 4 + chars * 2
+            remainder = (len(raw) - HEADER_SIZE) % fsize
+            if remainder == 0 and (len(raw) - HEADER_SIZE) // fsize > 0:
+                grid_cols, grid_rows = hdr_cols, hdr_rows
+
+    chars_per_frame = grid_cols * grid_rows
+    frame_size      = 4 + chars_per_frame * 2
+
+    n_frames = (len(raw) - HEADER_SIZE) // frame_size
     if n_frames == 0:
         raise ValueError("OSD file contains no frames")
 
-    osd  = OsdFile()
-    fmt  = f'<{CHARS_PER_FRAME}H'
+    osd  = OsdFile(grid_cols=grid_cols, grid_rows=grid_rows)
+    fmt  = f'<{chars_per_frame}H'
 
     for i in range(n_frames):
-        off   = HEADER_SIZE + i * FRAME_SIZE
+        off   = HEADER_SIZE + i * frame_size
         ts_ms = struct.unpack_from('<I', raw, off)[0]
         grid  = list(struct.unpack_from(fmt, raw, off + 4))
-        osd.frames.append(OsdFrame(index=i, time_ms=ts_ms, grid=grid))
+        osd.frames.append(OsdFrame(index=i, time_ms=ts_ms, grid=grid,
+                                   grid_cols=grid_cols))
         osd.timestamps.append(ts_ms)
 
     # Pull stats from first frame (FC shows post-flight stats screen at start)
-    osd.stats = _extract_stats(osd.frames[0])
+    osd.stats = _extract_stats(osd.frames[0], grid_cols, grid_rows)
     osd.stats.fc_type = fc_type
     return osd

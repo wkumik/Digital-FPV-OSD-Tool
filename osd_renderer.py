@@ -46,15 +46,17 @@ class OsdRenderConfig:
 
 
 def _auto_scale(video_w: int, video_h: int, tile_w: int, tile_h: int,
-                user_scale: float = 1.0) -> tuple[float, int, int]:
+                user_scale: float = 1.0,
+                grid_cols: int = GRID_COLS,
+                grid_rows: int = GRID_ROWS) -> tuple[float, int, int]:
     """
     Return (effective_scale, x_off, y_off).
     Scaling origin is the screen centre — both offsets recalculated at every scale.
     """
-    base        = video_h / (GRID_ROWS * tile_h)
+    base        = video_h / (grid_rows * tile_h)
     eff         = base * user_scale
-    grid_w      = GRID_COLS * tile_w * eff
-    grid_h      = GRID_ROWS * tile_h * eff
+    grid_w      = grid_cols * tile_w * eff
+    grid_h      = grid_rows * tile_h * eff
     return eff, int((video_w - grid_w) / 2), int((video_h - grid_h) / 2)
 
 
@@ -65,6 +67,8 @@ def render_osd_frame(
     osd_frame: OsdFrame | None,
     font: OsdFont,
     cfg: OsdRenderConfig,
+    grid_cols: int = GRID_COLS,
+    grid_rows: int = GRID_ROWS,
 ) -> "Image.Image":
     if not PIL_OK:
         return frame_img
@@ -73,7 +77,8 @@ def render_osd_frame(
 
     if osd_frame is not None:
         eff, x0, y0 = _auto_scale(out.width, out.height,
-                                   font.tile_w, font.tile_h, cfg.scale)
+                                   font.tile_w, font.tile_h, cfg.scale,
+                                   grid_cols, grid_rows)
         tw = max(1, int(font.tile_w * eff))
         th = max(1, int(font.tile_h * eff))
         x0 += cfg.offset_x
@@ -100,6 +105,8 @@ def render_fallback(
     frame_img: "Image.Image",
     osd_frame: OsdFrame | None,
     cfg: OsdRenderConfig,
+    grid_cols: int = GRID_COLS,
+    grid_rows: int = GRID_ROWS,
 ) -> "Image.Image":
     if not PIL_OK:
         return frame_img
@@ -108,8 +115,8 @@ def render_fallback(
     try:    pil_f = PILFont.truetype("arial.ttf", 14)
     except: pil_f = PILFont.load_default()
     if osd_frame is not None:
-        cw = max(8, out.width  // GRID_COLS)
-        ch = max(8, out.height // GRID_ROWS)
+        cw = max(8, out.width  // grid_cols)
+        ch = max(8, out.height // grid_rows)
         x0, y0 = cfg.offset_x, cfg.offset_y
         for row, col, code in osd_frame.non_empty():
             label = chr(code) if 32 <= code < 127 else "·"
@@ -173,7 +180,8 @@ class OsdRenderer:
     """
 
     def __init__(self, video_w: int, video_h: int,
-                 font: Optional[OsdFont], cfg: OsdRenderConfig):
+                 font: Optional[OsdFont], cfg: OsdRenderConfig,
+                 grid_cols: int = GRID_COLS, grid_rows: int = GRID_ROWS):
         self.w   = video_w
         self.h   = video_h
         self.font = font
@@ -182,7 +190,8 @@ class OsdRenderer:
         # Tile geometry
         if font:
             eff, self.x0, self.y0 = _auto_scale(
-                video_w, video_h, font.tile_w, font.tile_h, cfg.scale)
+                video_w, video_h, font.tile_w, font.tile_h, cfg.scale,
+                grid_cols, grid_rows)
             self.x0 += cfg.offset_x
             self.y0 += cfg.offset_y
             self.tw = max(1, int(font.tile_w * eff))
