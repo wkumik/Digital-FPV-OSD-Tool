@@ -45,7 +45,7 @@ except ImportError:
 from pathlib import Path
 from subprocess_utils import _hidden_popen, _hidden_run
 from osd_renderer import OsdRenderer, OsdRenderConfig, _draw_srt_bar
-from osd_parser   import parse_osd
+from osd_parser   import parse_osd, GRID_COLS, GRID_ROWS
 from srt_parser   import parse_srt
 from font_loader  import load_font
 
@@ -723,7 +723,9 @@ def _overlay_pipeline(
         srt_opacity = config.srt_opacity,
         srt_scale   = config.srt_scale,
     )
-    renderer = OsdRenderer(width, height, font, render_cfg)
+    gc = osd_data.grid_cols if osd_data else GRID_COLS
+    gr = osd_data.grid_rows if osd_data else GRID_ROWS
+    renderer = OsdRenderer(width, height, font, render_cfg, gc, gr)
 
     # Trim window — default to full video
     _t_start = config.trim_start if config.trim_start > 0.01 else 0.0
@@ -947,7 +949,9 @@ def _transparent_pipeline(
         srt_opacity = config.srt_opacity,
         srt_scale   = config.srt_scale,
     )
-    renderer = OsdRenderer(width, height, font, render_cfg)
+    gc = osd_data.grid_cols if osd_data else GRID_COLS
+    gr = osd_data.grid_rows if osd_data else GRID_ROWS
+    renderer = OsdRenderer(width, height, font, render_cfg, gc, gr)
 
     # Trim window
     _t_start = config.trim_start if config.trim_start > 0.01 else 0.0

@@ -1906,9 +1906,11 @@ class MainWindow(QMainWindow):
             srt_opacity  = self.srt_opacity_sl.value() / 100.0,
             srt_scale    = self.srt_size_sl.value() / 100.0,
         )
+        gc = self.osd_data.grid_cols if self.osd_data else GRID_COLS
+        gr = self.osd_data.grid_rows if self.osd_data else GRID_ROWS
         if self.font_obj and PIL_OK:
-            return render_osd_frame(img, osd_frame, self.font_obj, cfg)
-        return render_fallback(img, osd_frame, cfg)
+            return render_osd_frame(img, osd_frame, self.font_obj, cfg, gc, gr)
+        return render_fallback(img, osd_frame, cfg, gc, gr)
 
     def _render_osd_overlay(self, pct, w, h):
         """Render OSD + SRT as transparent overlay at display size (w, h).
@@ -1935,9 +1937,11 @@ class MainWindow(QMainWindow):
             srt_scale    = self.srt_size_sl.value() / 100.0,
         )
         canvas = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
+        gc = self.osd_data.grid_cols if self.osd_data else GRID_COLS
+        gr = self.osd_data.grid_rows if self.osd_data else GRID_ROWS
         if self.font_obj and PIL_OK:
-            return render_osd_frame(canvas, osd_frame, self.font_obj, cfg)
-        return render_fallback(canvas, osd_frame, cfg)
+            return render_osd_frame(canvas, osd_frame, self.font_obj, cfg, gc, gr)
+        return render_fallback(canvas, osd_frame, cfg, gc, gr)
 
     def _on_osd_offset_changed(self, value: int):
         global _OSD_OFFSET_MS
