@@ -33,7 +33,7 @@ import os
 import json
 import threading
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from typing import Optional, Callable
 
 try:
@@ -313,6 +313,7 @@ _NO_DEVICE_PHRASES = [
     "device type cuda not found",
     "cannot load nvcuda.dll",
     "cannot load libnvcuvid",
+    "cannot load libcuda",
     "cuda_error_no_device",
 ]
 
@@ -902,11 +903,16 @@ def _overlay_pipeline(
         if hw_info and config.use_hw:
             # Widen the GPU-failure check to include AMF and generic HW terms
             hw_phrases = ["nvenc", "amf", "vaapi", "qsv", "cuda",
-                          "no capable", "no device", "hwaccel", "d3d11"]
+                          "no capable", "no device", "hwaccel", "d3d11",
+                          "cannot load libcuda", "cannot load nvcuda"]
             if any(x in err.lower() for x in hw_phrases):
-                raise RuntimeError(
-                    f"GPU encode failed ({hw_info['name']}):\n{err[-800:]}\n\n"
-                    "Try disabling GPU acceleration in Settings.")
+                # ── Auto-fallback to CPU encoding ────────────────────────
+                if progress_callback:
+                    progress_callback(5, f"⚠ {hw_info['name']} failed — retrying with CPU…")
+                cpu_codec = "libx264" if "264" in config.codec or "264" in encoder else "libx265"
+                return process_video(
+                    _dc_replace(config, use_hw=False, codec=cpu_codec),
+                    progress_callback)
         raise RuntimeError(f"Encode failed (exit {ffmpeg_proc.returncode}):\n{err[-2000:]}")
 
     if progress_callback:
