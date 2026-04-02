@@ -723,9 +723,10 @@ def _overlay_pipeline(
         srt_opacity = config.srt_opacity,
         srt_scale   = config.srt_scale,
     )
-    gc = osd_data.grid_cols if osd_data else GRID_COLS
-    gr = osd_data.grid_rows if osd_data else GRID_ROWS
-    renderer = OsdRenderer(width, height, font, render_cfg, gc, gr)
+    gcols = osd_data.grid_cols if osd_data else GRID_COLS
+    grows = osd_data.grid_rows if osd_data else GRID_ROWS
+    renderer = OsdRenderer(width, height, font, render_cfg,
+                           grid_cols=gcols, grid_rows=grows)
 
     # Trim window — default to full video
     _t_start = config.trim_start if config.trim_start > 0.01 else 0.0
@@ -949,9 +950,10 @@ def _transparent_pipeline(
         srt_opacity = config.srt_opacity,
         srt_scale   = config.srt_scale,
     )
-    gc = osd_data.grid_cols if osd_data else GRID_COLS
-    gr = osd_data.grid_rows if osd_data else GRID_ROWS
-    renderer = OsdRenderer(width, height, font, render_cfg, gc, gr)
+    gcols = osd_data.grid_cols if osd_data else GRID_COLS
+    grows = osd_data.grid_rows if osd_data else GRID_ROWS
+    renderer = OsdRenderer(width, height, font, render_cfg,
+                           grid_cols=gcols, grid_rows=grows)
 
     # Trim window
     _t_start = config.trim_start if config.trim_start > 0.01 else 0.0

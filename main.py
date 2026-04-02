@@ -1769,7 +1769,8 @@ class MainWindow(QMainWindow):
 
     def _load_osd(self, path):
         try:
-            self.osd_data = parse_osd(path)
+            fps = getattr(self, 'video_fps', 60.0) or 60.0
+            self.osd_data = parse_osd(path, video_fps=fps)
             s = self.osd_data.stats
             self.osd_card.clear()
             self.osd_card.add_row("FC",   s.fc_type or "Unknown")

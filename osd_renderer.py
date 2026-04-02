@@ -29,7 +29,7 @@ try:
 except ImportError:
     PIL_OK = False
 
-from osd_parser  import OsdFrame, GRID_COLS, GRID_ROWS
+from osd_parser  import OsdFrame, GRID_COLS, GRID_ROWS  # defaults; frames carry their own dims
 from font_loader import OsdFont
 
 
@@ -78,7 +78,7 @@ def render_osd_frame(
     if osd_frame is not None:
         eff, x0, y0 = _auto_scale(out.width, out.height,
                                    font.tile_w, font.tile_h, cfg.scale,
-                                   grid_cols, grid_rows)
+                                   osd_frame.grid_cols, osd_frame.grid_rows)
         tw = max(1, int(font.tile_w * eff))
         th = max(1, int(font.tile_h * eff))
         x0 += cfg.offset_x
@@ -88,7 +88,7 @@ def render_osd_frame(
             glyph = font.get_char(code)
             if glyph is None:
                 continue
-            glyph = glyph.resize((tw, th), Image.LANCZOS)
+            glyph = glyph.resize((tw, th), Image.NEAREST)
             px, py = x0 + col * tw, y0 + row * th
             if px >= out.width or py >= out.height or px + tw <= 0 or py + th <= 0:
                 continue
@@ -115,8 +115,8 @@ def render_fallback(
     try:    pil_f = PILFont.truetype("arial.ttf", 14)
     except: pil_f = PILFont.load_default()
     if osd_frame is not None:
-        cw = max(8, out.width  // grid_cols)
-        ch = max(8, out.height // grid_rows)
+        cw = max(8, out.width  // osd_frame.grid_cols)
+        ch = max(8, out.height // osd_frame.grid_rows)
         x0, y0 = cfg.offset_x, cfg.offset_y
         for row, col, code in osd_frame.non_empty():
             label = chr(code) if 32 <= code < 127 else "·"
@@ -186,6 +186,8 @@ class OsdRenderer:
         self.h   = video_h
         self.font = font
         self.cfg  = cfg
+        self.grid_cols = grid_cols
+        self.grid_rows = grid_rows
 
         # Tile geometry
         if font:
@@ -224,7 +226,7 @@ class OsdRenderer:
             g = self.font.get_char(code)
             if g is None:
                 return None
-            g_arr  = np.array(g.resize((self.tw, self.th), Image.LANCZOS),
+            g_arr  = np.array(g.resize((self.tw, self.th), Image.NEAREST),
                               dtype=np.uint8)           # H×W×4
             g_alpha = g_arr[:, :, 3:4].astype(np.float32) / 255.0  # H×W×1
             self._glyphs[code] = (g_arr, g_alpha)
