@@ -37,8 +37,8 @@ from font_loader   import (fonts_by_firmware, load_font, load_font_from_file,
                            OsdFont, FIRMWARE_PREFIXES)
 from osd_renderer  import OsdRenderConfig, render_osd_frame, render_fallback
 from video_processor import (ProcessingConfig, ColorTransConfig, process_video,
-                             get_video_info, find_ffmpeg, detect_hw_encoder,
-                             detect_libplacebo)
+                             get_video_info, get_frame_pts, find_ffmpeg,
+                             detect_hw_encoder, detect_libplacebo)
 from splash_screen   import SplashScreen
 
 
@@ -1802,6 +1802,14 @@ class MainWindow(QMainWindow):
             if not p1_data or not p1_data.frames:
                 self._st("P1 OSD: no frames found")
                 return
+            # Remap P1 timestamps from frame_num/fps to actual video PTS
+            # (fixes OSD timer running too fast when frames are dropped)
+            pts = get_frame_pts(video_path)
+            if pts:
+                for fr in p1_data.frames:
+                    idx = fr.frame_index
+                    if 0 < idx <= len(pts):
+                        fr.time_ms = int(pts[idx - 1] * 1000)
             self.osd_data = p1_to_osd_file(p1_data)
             s = self.osd_data.stats
             self.osd_card.clear()
