@@ -1,6 +1,6 @@
 # VueOSD — Digital FPV OSD Tool
 
-Overlay MSP-OSD data onto FPV DVR video footage. Supports Betaflight, INAV, ArduPilot, BetaFPV P1, Caddx Ascent, [Ruby FPV](https://rubyfpv.com/) and [Onyx FPV](https://onyxfpv.com/).
+Overlay MSP-OSD data onto FPV DVR video footage. Supports Betaflight, INAV, ArduPilot, and BetaFPV P1. Compatible with [Ruby FPV](https://rubyfpv.com/) and [Onyx FPV](https://onyxfpv.com/) via standard MSP-OSD format.
 
 Reads `.osd` and `.srt` files recorded alongside your DVR video and renders the
 HUD elements directly onto the footage — frame-accurate, GPU-accelerated.
@@ -16,11 +16,9 @@ HUD elements directly onto the footage — frame-accurate, GPU-accelerated.
 - Firmware auto-detected from OSD file header
 - WTFOS / DJI O3 support (auto-detected 60×22 grid)
 - BetaFPV P1 embedded OSD support
-- Caddx Ascent OSD support
-- [Ruby FPV](https://rubyfpv.com/) support
-- [Onyx FPV](https://onyxfpv.com/) support
+- Compatible with [Ruby FPV](https://rubyfpv.com/) and [Onyx FPV](https://onyxfpv.com/) (standard MSP-OSD format)
 - SRT telemetry bar (speed, altitude, satellites, signal)
-- GPU-accelerated encoding (NVIDIA NVENC, AMD AMF, Intel QSV) with automatic CPU fallback
+- GPU-accelerated encoding (NVIDIA NVENC, AMD AMF, Intel QSV, VAAPI, VideoToolbox) with automatic CPU fallback
 - ColorTrans color correction with LUT preview
 - Transparent overlay export (VP9 alpha)
 - Trim, scale, offset, opacity controls
