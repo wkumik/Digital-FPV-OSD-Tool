@@ -924,8 +924,10 @@ class MainWindow(QMainWindow):
         self._player_panel.timeline.trimChanged.connect(self._on_trim_changed)
         self._player_panel.timeline.trimChanged.connect(lambda *_: self._update_size_hint())
 
-        # Wire refresh button
+        # Wire refresh button + preview-quality combo
         self._player_panel.transport.refreshClicked.connect(self._refresh_preview)
+        self._player_panel.transport.previewQualityChanged.connect(
+            self._on_preview_quality_changed)
 
         # Wire hide-region canvas signals + geometry callbacks
         _canvas = self._player_panel.canvas
@@ -969,8 +971,8 @@ class MainWindow(QMainWindow):
         pos_note.setStyleSheet(f"color:{_T()['muted']};font-size:10px;")
         posgl.addWidget(pos_note)
 
-        self.sl_x     = LabeledSlider("X offset", -400, 400,   0, " px")
-        self.sl_y     = LabeledSlider("Y offset", -200, 200,   0, " px")
+        self.sl_x     = LabeledSlider("X offset", -1200, 1200, 0, " px")
+        self.sl_y     = LabeledSlider("Y offset",  -800,  800, 0, " px")
         self.sl_scale = LabeledSlider("Scale",      50, 150, 100, "%")
         for sl in (self.sl_x, self.sl_y, self.sl_scale):
             sl.valueChanged.connect(self._queue_preview)
@@ -1356,16 +1358,35 @@ class MainWindow(QMainWindow):
         upscale_row.addWidget(self.upscale_combo, 1)
         encgl.addLayout(upscale_row)
 
+        # Aspect-ratio (letter/pillarbox) selector
+        aspect_row = QHBoxLayout()
+        self._aspect_lbl = QLabel("Aspect ratio:")
+        self._aspect_lbl.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
+        self.aspect_combo = QComboBox()
+        self.aspect_combo.addItems(["Source", "16:9", "4:3", "21:9", "1:1", "9:16"])
+        self.aspect_combo.setStyleSheet(COMBO_STYLE)
+        self.aspect_combo.setToolTip(
+            "Pad the video into a wider or taller canvas with black bars.\n"
+            "Use this to put a 4:3 source into a 16:9 frame and place OSD\n"
+            "elements inside the side bars (drag them out with the X offset)."
+        )
+        self.aspect_combo.currentIndexChanged.connect(self._on_aspect_changed)
+        aspect_row.addWidget(self._aspect_lbl)
+        aspect_row.addWidget(self.aspect_combo, 1)
+        encgl.addLayout(aspect_row)
+
         encgl.addWidget(_sep())
 
-        # Transparent overlay export
-        self.transparent_check = QCheckBox("Transparent overlay (VP9 alpha)")
+        # Chroma key export (OSD on solid magenta background, H.264 .mp4)
+        self.transparent_check = QCheckBox("Chroma key export (magenta)")
         self.transparent_check.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
         self.transparent_check.setToolTip(
-            "Export only the OSD glyphs and SRT bar as a video with\n"
-            "a transparent background (VP9 alpha, .webm).\n\n"
-            "Layer it on GoPro/action-cam footage in DaVinci Resolve,\n"
-            "Premiere Pro, or Final Cut Pro."
+            "Export only the OSD glyphs and SRT bar onto a solid magenta\n"
+            "background as a standard H.264 .mp4. Pull the magenta key in\n"
+            "DaVinci Resolve, Premiere Pro, or Final Cut Pro to layer the\n"
+            "OSD onto GoPro/action-cam footage.\n\n"
+            "Magenta is used because no FPV OSD glyphs ever contain it,\n"
+            "so the keyer can't eat any OSD content."
         )
         self.transparent_check.stateChanged.connect(self._on_transparent_changed)
         encgl.addWidget(self.transparent_check)
@@ -1431,6 +1452,51 @@ class MainWindow(QMainWindow):
 
     def _on_codec_changed(self):
         self._update_size_hint()
+
+    def _on_preview_quality_changed(self, idx: int):
+        """Toggle controller's full-quality preview decode mode."""
+        if not getattr(self, "_player_panel", None):
+            return
+        self._player_panel.controller.set_full_quality_preview(idx == 1)
+
+    def _on_aspect_changed(self, _idx):
+        """Aspect ratio dropdown changed: re-pad preview canvas + refresh."""
+        self._apply_aspect_to_canvas()
+        self._sync_region_overlay()
+        self._refresh_preview()
+
+    def _apply_aspect_to_canvas(self):
+        """Push current target aspect ratio into the player canvas."""
+        canvas = self._player_panel.canvas if getattr(self, "_player_panel", None) else None
+        if canvas is None:
+            return
+        target = self._current_target_aspect()
+        if not target or ":" not in target:
+            canvas.set_aspect_padding(0, 0)
+            return
+        try:
+            aw, ah = (int(p) for p in target.split(":", 1))
+            canvas.set_aspect_padding(aw, ah)
+        except Exception:
+            canvas.set_aspect_padding(0, 0)
+
+    def _current_target_aspect(self) -> str:
+        """Return the dropdown's value as a 'W:H' string, or '' for source."""
+        if not getattr(self, "aspect_combo", None):
+            return ""
+        txt = self.aspect_combo.currentText().strip()
+        return "" if txt == "Source" else txt
+
+    def _current_canvas_dims(self) -> tuple[int, int, int, int]:
+        """Return (canvas_w, canvas_h, src_x, src_y) for the current source
+        video + chosen aspect, or source dims if aspect is 'Source'."""
+        ctrl = self._player_panel.controller if getattr(self, "_player_panel", None) else None
+        sw = getattr(ctrl, "video_w", 0) or 0
+        sh = getattr(ctrl, "video_h", 0) or 0
+        if sw <= 0 or sh <= 0:
+            return 0, 0, 0, 0
+        from video_processor import compute_canvas_dims
+        return compute_canvas_dims(sw, sh, self._current_target_aspect())
 
     def _on_transparent_changed(self, state):
         """Toggle encoding controls when transparent overlay mode changes."""
@@ -1867,6 +1933,8 @@ class MainWindow(QMainWindow):
             self._player_panel.controller.load_video(
                 self.video_row.path, self.video_dur, self.video_fps,
                 info.get("width", 0), info.get("height", 0))
+            # Apply aspect padding spec now that source dims are known
+            self._apply_aspect_to_canvas()
         self._st("Ready")
 
     ## _start_prefetch, _prefetch_frames — removed (now in PlayerController)
@@ -2025,19 +2093,30 @@ class MainWindow(QMainWindow):
         ox, oy = canvas.display_origin()
         cols = self.osd_data.grid_cols if self.osd_data else GRID_COLS
         rows = self.osd_data.grid_rows if self.osd_data else GRID_ROWS
-        # Match OsdRenderer._auto_scale: base = disp_h / (rows*tile_h)
+        ctrl = self._player_panel.controller
+        # Source video area within the (possibly padded) display canvas.
+        cw, ch, _sx, _sy = self._current_canvas_dims()
+        if cw > 0 and ch > 0 and ctrl.video_w > 0:
+            src_disp_w = int(round(ctrl.video_w * (disp_w / cw)))
+            src_disp_h = int(round(ctrl.video_h * (disp_h / ch)))
+        else:
+            src_disp_w = disp_w
+            src_disp_h = disp_h
+        src_disp_x = (disp_w - src_disp_w) // 2
+        src_disp_y = (disp_h - src_disp_h) // 2
         tile_w = self.font_obj.tile_w
         tile_h = self.font_obj.tile_h
-        base = disp_h / (rows * tile_h) if tile_h and rows else 1.0
+        base = src_disp_h / (rows * tile_h) if tile_h and rows else 1.0
         eff = base * (self.sl_scale.value() / 100.0)
         tw = max(1, int(tile_w * eff))
         th = max(1, int(tile_h * eff))
-        ctrl = self._player_panel.controller
-        ratio = disp_h / ctrl.video_h if getattr(ctrl, "video_h", 0) else 1.0
+        # User offset is in source-pixel units; convert to display pixels via
+        # the same height ratio used by the OSD render.
+        ratio = src_disp_h / ctrl.video_h if getattr(ctrl, "video_h", 0) else 1.0
         user_x = int(self.sl_x.value() * ratio)
         user_y = int(self.sl_y.value() * ratio)
-        x0 = ox + int((disp_w - cols * tw) / 2) + user_x
-        y0 = oy + int((disp_h - rows * th) / 2) + user_y
+        x0 = ox + src_disp_x + int((src_disp_w - cols * tw) / 2) + user_x
+        y0 = oy + src_disp_y + int((src_disp_h - rows * th) / 2) + user_y
         return x0, y0, tw, th, cols, rows
 
     def _region_px_to_cell(self, x: int, y: int):
@@ -2138,6 +2217,33 @@ class MainWindow(QMainWindow):
         if self.srt_data and self.srt_bar_check.isChecked():
             td = self.srt_data.get_data_at_time(t_ms)
             if td: srt_text = td.status_line(self.srt_fields_combo.checked_keys())
+        # Aspect padding: wrap source frame in black canvas before compositing.
+        # Pad rect is computed from the INPUT frame's actual size, since
+        # playback / scrub frames are decoded at scaled-down dims, not native.
+        src_w, src_h = img.width, img.height
+        target = self._current_target_aspect()
+        if target and ":" in target:
+            try:
+                aw, ah = (int(p) for p in target.split(":", 1))
+            except Exception:
+                aw = ah = 0
+            if aw > 0 and ah > 0:
+                target_ratio = aw / ah
+                src_ratio    = src_w / src_h
+                if abs(src_ratio - target_ratio) > 1e-3:
+                    if src_ratio < target_ratio:
+                        cw = int(round(src_h * target_ratio))
+                        ch = src_h
+                    else:
+                        cw = src_w
+                        ch = int(round(src_w / target_ratio))
+                    cw = (cw // 2) * 2
+                    ch = (ch // 2) * 2
+                    sx = (cw - src_w) // 2
+                    sy = (ch - src_h) // 2
+                    padded = PILImage.new("RGBA", (cw, ch), (0, 0, 0, 255))
+                    padded.paste(img.convert("RGBA") if img.mode != "RGBA" else img, (sx, sy))
+                    img = padded
         cfg = OsdRenderConfig(
             offset_x     = self.sl_x.value(),
             offset_y     = self.sl_y.value(),
@@ -2147,6 +2253,8 @@ class MainWindow(QMainWindow):
             srt_opacity  = self.srt_opacity_sl.value() / 100.0,
             srt_scale    = self.srt_size_sl.value() / 100.0,
             hide_regions = self._active_hide_regions(),
+            source_w     = src_w,
+            source_h     = src_h,
         )
         gc = self.osd_data.grid_cols if self.osd_data else GRID_COLS
         gr = self.osd_data.grid_rows if self.osd_data else GRID_ROWS
@@ -2166,9 +2274,18 @@ class MainWindow(QMainWindow):
         if self.srt_data and self.srt_bar_check.isChecked():
             td = self.srt_data.get_data_at_time(t_ms)
             if td: srt_text = td.status_line(self.srt_fields_combo.checked_keys())
-        # Scale pixel offsets from video resolution to display resolution
+        # Scale pixel offsets from canvas (incl. bars) to display resolution
         ctrl = self._player_panel.controller
-        ratio = h / ctrl.video_h if ctrl.video_h > 0 else 1.0
+        cw, ch, _sx, _sy = self._current_canvas_dims()
+        canvas_h = ch if ch > 0 else (ctrl.video_h or h)
+        ratio = h / canvas_h if canvas_h > 0 else 1.0
+        # Source dims at display resolution — let the renderer center on the
+        # source area inside the (display-sized) padded canvas.
+        if cw > 0 and ch > 0 and ctrl.video_w > 0:
+            display_src_w = int(round(ctrl.video_w * (w / cw)))
+            display_src_h = int(round(ctrl.video_h * (h / ch)))
+        else:
+            display_src_w = display_src_h = 0
         cfg = OsdRenderConfig(
             offset_x     = int(self.sl_x.value() * ratio),
             offset_y     = int(self.sl_y.value() * ratio),
@@ -2178,6 +2295,8 @@ class MainWindow(QMainWindow):
             srt_opacity  = self.srt_opacity_sl.value() / 100.0,
             srt_scale    = self.srt_size_sl.value() / 100.0,
             hide_regions = self._active_hide_regions(),
+            source_w     = display_src_w,
+            source_h     = display_src_h,
         )
         canvas = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
         gc = self.osd_data.grid_cols if self.osd_data else GRID_COLS
@@ -2564,7 +2683,7 @@ class MainWindow(QMainWindow):
             ts = ""
 
         if hasattr(self, 'transparent_check') and self.transparent_check.isChecked():
-            out_name = f"{stem}_overlay{ts}.webm"
+            out_name = f"{stem}_chromakey{ts}.mp4"
         else:
             out_name = f"{stem}_osd{ts}.mp4"
         return str(p.parent / out_name)
@@ -2737,7 +2856,7 @@ class MainWindow(QMainWindow):
             def _sa():
                 new_name = name_edit.text().strip()
                 if not new_name: return
-                _req_ext = ".webm" if self.transparent_check.isChecked() else ".mp4"
+                _req_ext = ".mp4"
                 if not new_name.lower().endswith(_req_ext):
                     new_name += _req_ext
                 new_path = os.path.join(os.path.dirname(out_path), new_name)
@@ -2768,11 +2887,7 @@ class MainWindow(QMainWindow):
         _upscale_map = {0: "", 1: "1440p", 2: "2.7k", 3: "4k"}
         upscale_target = _upscale_map.get(self.upscale_combo.currentIndex(), "")
 
-        # Force .webm extension for transparent export (VP9 alpha needs WebM container)
         _out_path = self.out_row.path
-        if self.transparent_check.isChecked() and not _out_path.lower().endswith(".webm"):
-            _out_path = str(Path(_out_path).with_suffix(".webm"))
-            self.out_row.set_path(_out_path)
 
         cfg = ProcessingConfig(
             input_video   = self.video_row.path,
@@ -2800,6 +2915,7 @@ class MainWindow(QMainWindow):
             hide_regions = self._active_hide_regions(),
             color_config = self._get_color_config() if self.cc_enable.isChecked() and not self.transparent_check.isChecked() else None,
             transparent_export = self.transparent_check.isChecked(),
+            target_aspect = self._current_target_aspect(),
         )
 
         self.render_btn.setEnabled(False)

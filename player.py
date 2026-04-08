@@ -10,7 +10,7 @@ import os, sys, time, threading, subprocess, random
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QSizePolicy, QFrame,
+    QSizePolicy, QFrame, QComboBox,
 )
 from PyQt6.QtCore import Qt, QTimer, QRect, QUrl, pyqtSignal
 from PyQt6.QtGui import (
@@ -103,6 +103,14 @@ class VideoCanvas(QWidget):
         self._region_drag_start: tuple[int, int] | None = None  # canvas px
         self._region_drag_cur: tuple[int, int] | None = None
         self._region_hover_idx: int = -1
+        # Aspect-ratio padding: stored as a (aw, ah) ratio so the pad rect
+        # can be computed from whatever resolution the cached frame happens
+        # to be at (extraction scales preview frames down to <= 1080p).
+        # (0, 0) = no padding.
+        self._pad_aspect: tuple[int, int] = (0, 0)
+        # The unmodified source frame is kept separately so we can re-pad
+        # when the aspect ratio changes without re-decoding.
+        self._source_pil = None
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -111,7 +119,9 @@ class VideoCanvas(QWidget):
         if not PIL_OK or pil_img is None:
             return
         self._show_placeholder = False
-        self._base_pil = pil_img.convert("RGBA") if pil_img.mode != "RGBA" else pil_img
+        src = pil_img.convert("RGBA") if pil_img.mode != "RGBA" else pil_img
+        self._source_pil = src
+        self._base_pil = self._apply_aspect_pad(src)
         self._donate_rects = []
         self._rebuild_base()
         self.update()
@@ -131,11 +141,16 @@ class VideoCanvas(QWidget):
 
     def set_frame(self, pil_img):
         """Display a pre-composited frame (used by playback path).
-        Sets as base and clears OSD overlay."""
+        Sets as base and clears OSD overlay. Already-padded frames bypass
+        the aspect-pad re-wrap."""
         if not PIL_OK or pil_img is None:
             return
         self._show_placeholder = False
-        self._base_pil = pil_img.convert("RGBA") if pil_img.mode != "RGBA" else pil_img
+        src = pil_img.convert("RGBA") if pil_img.mode != "RGBA" else pil_img
+        # Playback path supplies already-composited frames (padded by main),
+        # so don't double-pad — but still keep them as the source for re-pad.
+        self._source_pil = src
+        self._base_pil = src
         self._osd_pixmap = None
         self._donate_rects = []
         self._rebuild_base()
@@ -144,11 +159,53 @@ class VideoCanvas(QWidget):
     def set_placeholder(self):
         """Show the Quick Start placeholder."""
         self._base_pil = None
+        self._source_pil = None
         self._base_pixmap = None
         self._osd_pixmap = None
         self._show_placeholder = True
         self._donate_rects = []
         self.update()
+
+    def set_aspect_padding(self, aw: int, ah: int):
+        """Set or clear letter/pillarbox padding by target aspect ratio.
+        Pass (0, 0) to disable. The pad rect is computed from each frame's
+        actual size, so this works regardless of the cached frame's
+        resolution (ffmpeg scales preview frames down)."""
+        self._pad_aspect = (int(aw), int(ah))
+        if self._source_pil is not None:
+            self._base_pil = self._apply_aspect_pad(self._source_pil)
+            self._rebuild_base()
+        self._osd_pixmap = None  # stale dims — controller will re-render
+        self.update()
+        self.resized.emit()
+
+    def _apply_aspect_pad(self, src_pil):
+        """Return src_pil wrapped inside a black canvas matching the current
+        target aspect ratio, or src_pil unchanged when no padding is set or
+        the source already matches the target."""
+        if not PIL_OK or src_pil is None:
+            return src_pil
+        aw, ah = self._pad_aspect
+        if aw <= 0 or ah <= 0:
+            return src_pil
+        sw, sh = src_pil.width, src_pil.height
+        target_ratio = aw / ah
+        src_ratio    = sw / sh
+        if abs(src_ratio - target_ratio) < 1e-3:
+            return src_pil
+        if src_ratio < target_ratio:
+            cw = int(round(sh * target_ratio))
+            ch = sh
+        else:
+            cw = sw
+            ch = int(round(sw / target_ratio))
+        cw = (cw // 2) * 2
+        ch = (ch // 2) * 2
+        sx = (cw - sw) // 2
+        sy = (ch - sh) // 2
+        canvas = PILImage.new("RGBA", (cw, ch), (0, 0, 0, 255))
+        canvas.paste(src_pil, (sx, sy))
+        return canvas
 
     def has_frame(self):
         return self._base_pil is not None
@@ -714,6 +771,7 @@ class TransportBar(QWidget):
     stepBackClicked = pyqtSignal()
     stepFwdClicked = pyqtSignal()
     refreshClicked = pyqtSignal()
+    previewQualityChanged = pyqtSignal(int)  # 0 = cached, 1 = original
 
     def __init__(self, theme_fn, icon_fn, btn_play_fn, btn_sec_fn, parent=None):
         super().__init__(parent)
@@ -778,6 +836,22 @@ class TransportBar(QWidget):
         self.ref_btn.setStyleSheet(self._btn_sec())
         self.ref_btn.clicked.connect(self.refreshClicked)
 
+        self.preview_quality_combo = QComboBox()
+        self.preview_quality_combo.addItems(["Cached (fast)", "Original (full-res)"])
+        self.preview_quality_combo.setFixedHeight(34)
+        self.preview_quality_combo.setMinimumWidth(140)
+        self.preview_quality_combo.setStyleSheet(
+            f"QComboBox{{background:{t['surface']};color:{t['text']};"
+            f"border:1px solid {t['border2']};border-radius:4px;padding:3px 8px;font-size:11px;}}"
+            f"QComboBox::drop-down{{border:none;width:18px;}}"
+        )
+        self.preview_quality_combo.setToolTip(
+            "Cached: scaled-down preview frames, snappy seeking.\n"
+            "Original: native source resolution — pixel-accurate but\n"
+            "noticeably slower to scrub on large videos."
+        )
+        self.preview_quality_combo.currentIndexChanged.connect(self.previewQualityChanged)
+
         self.speed_lbl = QLabel("")
         self.speed_lbl.setStyleSheet(f"color:{t['accent']};font-size:10px;font-weight:bold;")
         self.speed_lbl.setFixedWidth(40)
@@ -792,6 +866,7 @@ class TransportBar(QWidget):
         lay.addWidget(self.skip_btn)
         lay.addStretch(1)
         lay.addWidget(self.ref_btn)
+        lay.addWidget(self.preview_quality_combo)
 
     def set_playing(self, playing):
         name = "pause.png" if playing else "play.png"
@@ -852,6 +927,7 @@ class PlayerController:
         self.video_fps = 60.0
         self.video_w = 0
         self.video_h = 0
+        self.full_quality_preview = False  # True = decode at native res
         self._color_vf = ""   # color correction video filter string
 
         # Cache
@@ -934,6 +1010,20 @@ class PlayerController:
             self._do_refresh()
             self._start_prefetch()
 
+    def set_full_quality_preview(self, enabled: bool):
+        """Toggle native-resolution preview decoding. Drops the cache so the
+        next refresh re-extracts at the new quality."""
+        new = bool(enabled)
+        if new == self.full_quality_preview:
+            return
+        self.full_quality_preview = new
+        if hasattr(self, "cached_frames"):
+            self.cached_frames.clear()
+        self.timeline.set_cached(set())
+        if self.video_path and self.video_w > 0 and self.video_h > 0:
+            pct = int(self.timeline._position * _SL_MAX)
+            self._extract_at_pct(pct)
+
     def load_video(self, path, duration, fps, width=0, height=0):
         """Called after video info is available."""
         self.stop()
@@ -987,7 +1077,14 @@ class PlayerController:
     def _extraction_dims(self, cap=1080):
         """Return (scale_w, scale_h) for frame extraction, preserving the
         video's native aspect ratio.  Falls back to canvas AR if video
-        dimensions are unknown."""
+        dimensions are unknown.
+        When `full_quality_preview` is set, returns native source dims so
+        the preview shows pixel-perfect frames at the cost of decode speed."""
+        if getattr(self, "full_quality_preview", False) \
+                and self.video_w > 0 and self.video_h > 0:
+            sw = self.video_w - (self.video_w % 2)
+            sh = self.video_h - (self.video_h % 2)
+            return max(2, sw), max(2, sh)
         if self.video_w > 0 and self.video_h > 0:
             ar = self.video_w / self.video_h
         else:

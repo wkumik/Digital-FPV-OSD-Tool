@@ -32,6 +32,7 @@ import shutil
 import os
 import json
 import threading
+import time
 import tempfile
 from dataclasses import dataclass, replace as _dc_replace
 from typing import Optional, Callable
@@ -260,7 +261,8 @@ class ProcessingConfig:
     srt_enabled_fields: Optional[set] = None  # SRT field keys to show; None = all
     hide_regions: list = None  # List of (r0,c0,r1,c1) OSD grid rects to blank
     color_config: Optional[ColorTransConfig] = None  # Color correction settings
-    transparent_export: bool = False  # Export OSD-only with alpha (ProRes 4444 .mov)
+    transparent_export: bool = False  # Chroma-key export (OSD on magenta, .mp4)
+    target_aspect: str = ""           # "" = source | "16:9" | "4:3" | "21:9" | "1:1" | "9:16"
 
 
 # ── GPU encoder detection ─────────────────────────────────────────────────────
@@ -486,6 +488,57 @@ def get_frame_pts(video_path: str, trim_start: float = 0.0) -> list:
         return []
 
 
+class _ProgressHeartbeat:
+    """Background ticker that nudges the progress bar during a slow blocking
+    phase (ffprobe, ffmpeg startup, first composite). Asymptotically approaches
+    `cap_pct` so it never overshoots whatever phase comes next.
+
+    Usage:
+        hb = _ProgressHeartbeat(progress_callback, start=5, cap=9, message="Reading frame timestamps…")
+        hb.start()
+        try:
+            slow_blocking_work()
+        finally:
+            hb.stop()
+    """
+    def __init__(self, callback, start: int, cap: int, message: str,
+                 interval: float = 0.25):
+        self._cb = callback
+        self._start = float(start)
+        self._cap = float(cap)
+        self._msg = message
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self):
+        if self._cb is None or self._cap <= self._start:
+            return self
+        def _run():
+            t0 = time.time()
+            # Reach ~63% of (cap-start) after `tau` seconds, asymptote at cap.
+            tau = 6.0
+            while not self._stop.is_set():
+                elapsed = time.time() - t0
+                import math as _math
+                frac = 1.0 - _math.exp(-elapsed / tau)
+                pct = self._start + (self._cap - self._start) * frac
+                try:
+                    self._cb(int(round(pct)), self._msg)
+                except Exception:
+                    pass
+                if self._stop.wait(self._interval):
+                    break
+        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.5)
+
+
 _STDERR_CAP = 32 * 1024   # keep last 32 KB of ffmpeg stderr
 
 # OSD updates at ~10fps; video runs at 60fps so most consecutive frames share the
@@ -654,11 +707,13 @@ def process_video(
 
     # ── Choose pipeline ────────────────────────────────────────────────────────
 
-    # Transparent overlay export: OSD frames → ProRes 4444 with alpha, no source video decode
+    # Chroma-key export: OSD frames flattened onto a solid magenta background,
+    # encoded as H.264 .mp4. The user keys the magenta out in their NLE.
+    # Avoids the VP9 yuva420p chroma-subsampling halo entirely.
     if config.transparent_export:
         if osd_data is None and srt_data is None:
-            raise RuntimeError("Transparent export requires OSD data or SRT data — nothing to render.")
-        return _transparent_pipeline(
+            raise RuntimeError("Chroma key export requires OSD data or SRT data — nothing to render.")
+        return _chroma_key_pipeline(
             ffmpeg, config, osd_data, srt_data, font,
             width, height, fps, duration, progress_callback)
 
@@ -682,15 +737,65 @@ def process_video(
 # ── Upscale target → filter string ───────────────────────────────────────────
 _UPSCALE_HEIGHTS = {"1440p": 1440, "2.7k": 1512, "4k": 2160}
 
-def _upscale_filter(target: str, fc_fmt, use_vaapi: bool, color_vf: str = "") -> str:
+# Aspect-ratio presets accepted by `target_aspect`. The string is parsed as
+# "W:H"; the helper below pads (never crops) the source to that aspect.
+_ASPECT_RATIOS = {
+    "16:9": (16, 9),
+    "4:3":  (4,  3),
+    "21:9": (21, 9),
+    "1:1":  (1,  1),
+    "9:16": (9, 16),
+}
+
+
+def compute_canvas_dims(src_w: int, src_h: int, target_aspect: str) -> tuple[int, int, int, int]:
+    """Return (canvas_w, canvas_h, src_x, src_y) where the source video is
+    pillarboxed/letterboxed inside a canvas with the requested aspect ratio.
+
+    Returns the source dims unchanged when target_aspect is empty/unknown or
+    already matches the source. Output dims are forced even (codec-friendly).
+    """
+    if not target_aspect or target_aspect not in _ASPECT_RATIOS:
+        return src_w, src_h, 0, 0
+    aw, ah = _ASPECT_RATIOS[target_aspect]
+    src_ratio    = src_w / src_h
+    target_ratio = aw / ah
+    if abs(src_ratio - target_ratio) < 1e-3:
+        return src_w, src_h, 0, 0
+    if src_ratio < target_ratio:
+        # Source is taller than target → pillarbox (widen the canvas)
+        canvas_h = src_h
+        canvas_w = round(src_h * target_ratio)
+    else:
+        # Source is wider than target → letterbox (heighten the canvas)
+        canvas_w = src_w
+        canvas_h = round(src_w / target_ratio)
+    canvas_w = (canvas_w // 2) * 2
+    canvas_h = (canvas_h // 2) * 2
+    src_x = (canvas_w - src_w) // 2
+    src_y = (canvas_h - src_h) // 2
+    return canvas_w, canvas_h, src_x, src_y
+
+
+def _upscale_filter(target: str, fc_fmt, use_vaapi: bool, color_vf: str = "",
+                    pad: tuple[int, int, int, int] | None = None) -> str:
     """Build the filter_complex string for overlay + optional upscale.
 
     color_vf: optional color correction filter(s) applied to [0:v] BEFORE overlay.
     """
     h = _UPSCALE_HEIGHTS.get((target or "").lower())
-    # If color correction is active, apply it to source video before overlay
+    # Build the [0:v] chain: optional colour correction → optional aspect pad
+    chain_parts = []
     if color_vf:
-        src = f"[0:v]{color_vf}[cc];[cc]"
+        chain_parts.append(color_vf)
+    if pad and pad[0] > 0 and pad[1] > 0 and (pad[2] > 0 or pad[3] > 0):
+        canvas_w, canvas_h, src_x, src_y = pad
+        # setsar=1 normalises the SAR so the overlay coordinates align with px.
+        chain_parts.append(
+            f"pad={canvas_w}:{canvas_h}:{src_x}:{src_y}:black,setsar=1"
+        )
+    if chain_parts:
+        src = f"[0:v]{','.join(chain_parts)}[cc];[cc]"
     else:
         src = "[0:v]"
     if use_vaapi:
@@ -716,6 +821,15 @@ def _overlay_pipeline(
     Python never reads or writes a single raw video frame.
     """
     total_frames = max(1, int(duration * fps))
+
+    # ── Aspect-ratio canvas (letter/pillarbox) ────────────────────────────────
+    src_w, src_h = width, height
+    canvas_w, canvas_h, src_x, src_y = compute_canvas_dims(
+        src_w, src_h, config.target_aspect)
+    aspect_pad = (canvas_w, canvas_h, src_x, src_y) if (canvas_w != src_w or canvas_h != src_h) else None
+    # The OSD pipe MUST be at canvas dims so glyphs can sit in the bars.
+    width, height = canvas_w, canvas_h
+
     render_cfg = OsdRenderConfig(
         offset_x    = config.offset_x,
         offset_y    = config.offset_y,
@@ -724,6 +838,8 @@ def _overlay_pipeline(
         srt_opacity = config.srt_opacity,
         srt_scale   = config.srt_scale,
         hide_regions = list(config.hide_regions or []),
+        source_w    = src_w,
+        source_h    = src_h,
     )
     gcols = osd_data.grid_cols if osd_data else GRID_COLS
     grows = osd_data.grid_rows if osd_data else GRID_ROWS
@@ -752,13 +868,22 @@ def _overlay_pipeline(
     n_out_frames = max(1, int(_t_dur * fps))
 
     if progress_callback:
-        progress_callback(5, f"{width}x{height} @ {fps}fps · {n_out_frames} frames · {enc_label}")
+        progress_callback(3, f"{width}x{height} @ {fps}fps · {n_out_frames} frames · {enc_label}")
 
     # ── PTS extraction (fast metadata-only ffprobe) ───────────────────────────
     # Fetch actual presentation timestamps so OSD stays locked after video gaps
     # (dropped packets → frozen frames in CFR output → i/fps drifts away).
-    pts_list = get_frame_pts(config.input_video, _t_start)
+    _hb = _ProgressHeartbeat(progress_callback, start=4, cap=7,
+                             message=f"Reading frame timestamps…  [{enc_label}]").start()
+    try:
+        pts_list = get_frame_pts(config.input_video, _t_start)
+    finally:
+        _hb.stop()
     use_pts  = len(pts_list) >= n_out_frames
+
+    # Heartbeat for ffmpeg subprocess startup
+    _hb = _ProgressHeartbeat(progress_callback, start=7, cap=9,
+                             message=f"Starting encoder…  [{enc_label}]").start()
 
     if use_pts:
         # Check for gaps: any consecutive PTS jump > 2.5 × normal frame interval
@@ -816,7 +941,7 @@ def _overlay_pipeline(
         + ["-sws_flags", "lanczos+accurate_rnd+full_chroma_int"]
         # Overlay filter: OSD on top of source, optional upscale, then encode
         + ["-filter_complex",
-           (_upscale_filter(config.upscale_target, _fc_fmt, use_vaapi, _color_vf))]
+           (_upscale_filter(config.upscale_target, _fc_fmt, use_vaapi, _color_vf, aspect_pad))]
         + ["-map", "[v]",
            "-map", "0:a:0?",
            "-c:v", encoder]
@@ -844,7 +969,11 @@ def _overlay_pipeline(
 
     # Frame cache: (osd_index, srt_text) → composited bytes  (see module-level _CACHE_MAX)
     _frame_cache: dict = {}
-    report_every = max(1, n_out_frames // 50)
+    report_every = max(1, n_out_frames // 100)
+
+    # ffmpeg has launched; the encoder-startup heartbeat can stop now —
+    # the per-frame loop will take over the bar.
+    _hb.stop()
 
     try:
         if not osd_in_window:
@@ -879,7 +1008,7 @@ def _overlay_pipeline(
                 ffmpeg_proc.stdin.write(_frame_cache[cache_key])
 
                 if progress_callback and (i % report_every == 0 or i == n_out_frames - 1):
-                    pct = min(5 + int(i / n_out_frames * 85), 90)
+                    pct = min(10 + int((i + 1) / n_out_frames * 80), 90)
                     progress_callback(pct,
                         f"Frame {i+1}/{n_out_frames}  ({abs_t_ms/1000:.1f}s)  [{enc_label}]")
 
@@ -926,23 +1055,40 @@ def _overlay_pipeline(
     return osd_trimmed_warning or True
 
 
-# ── Transparent overlay export (ProRes 4444 with alpha) ────────────────────────
+# ── Chroma key export (OSD on solid magenta, H.264 .mp4) ──────────────────────
 
-def _transparent_pipeline(
+# Bright magenta — never appears in stock OSD glyphs/SRT bar, so the user's
+# NLE chroma keyer can pull a clean key without spilling onto OSD content.
+_CHROMA_KEY_RGB = (255, 0, 255)
+
+
+def _chroma_key_pipeline(
     ffmpeg, config, osd_data, srt_data, font,
     width, height, fps, duration, progress_callback,
 ):
     """
-    Render OSD+SRT frames with transparency → VP9 alpha .webm (no source video composited).
-    Source video is still needed for dimensions, fps, duration, and PTS timestamps.
+    Render OSD+SRT frames flattened onto a solid magenta background, encoded
+    as standard H.264 .mp4. The user keys the magenta out in their NLE
+    (Premiere Ultra Key, DaVinci 3D Keyer, etc.). This sidesteps VP9 alpha's
+    yuva420p chroma-subsampling halos entirely and produces visibly cleaner
+    glyph edges than any straight-alpha approach.
     """
-    # VP9 alpha requires WebM container — force extension
+    # Force .mp4 extension
     out_path = config.output_video
-    if not out_path.lower().endswith(".webm"):
-        out_path = os.path.splitext(out_path)[0] + ".webm"
+    base, _ext = os.path.splitext(out_path)
+    if _ext.lower() != ".mp4":
+        out_path = base + ".mp4"
         config.output_video = out_path
 
-    enc_label = "VP9 alpha"
+    enc_label = "Chroma key (magenta)"
+
+    # Aspect-ratio canvas — entire canvas becomes magenta, so the "bars" key
+    # out the same way as the rest of the background. The OSD positions itself
+    # against the source area inside.
+    src_w, src_h = width, height
+    canvas_w, canvas_h, _src_x, _src_y = compute_canvas_dims(
+        src_w, src_h, config.target_aspect)
+    width, height = canvas_w, canvas_h
 
     render_cfg = OsdRenderConfig(
         offset_x    = config.offset_x,
@@ -952,11 +1098,29 @@ def _transparent_pipeline(
         srt_opacity = config.srt_opacity,
         srt_scale   = config.srt_scale,
         hide_regions = list(config.hide_regions or []),
+        source_w    = src_w,
+        source_h    = src_h,
     )
     gcols = osd_data.grid_cols if osd_data else GRID_COLS
     grows = osd_data.grid_rows if osd_data else GRID_ROWS
     renderer = OsdRenderer(width, height, font, render_cfg,
                            grid_cols=gcols, grid_rows=grows)
+
+    # Pre-built solid magenta background buffer (RGB only — alpha dropped at write time)
+    bg_rgb = np.empty((height, width, 3), dtype=np.uint8)
+    bg_rgb[..., 0] = _CHROMA_KEY_RGB[0]
+    bg_rgb[..., 1] = _CHROMA_KEY_RGB[1]
+    bg_rgb[..., 2] = _CHROMA_KEY_RGB[2]
+    # Reused output buffer — flattened RGB (no alpha plane sent to ffmpeg)
+    out_rgb = np.empty_like(bg_rgb)
+
+    def _flatten(rgba: np.ndarray) -> bytes:
+        """Composite the renderer's RGBA buffer over the magenta background."""
+        a = rgba[:, :, 3:4].astype(np.float32) / 255.0
+        src = rgba[:, :, :3].astype(np.float32)
+        np.copyto(out_rgb,
+                  (src * a + bg_rgb.astype(np.float32) * (1.0 - a)).astype(np.uint8))
+        return bytes(out_rgb)
 
     # Trim window
     _t_start = config.trim_start if config.trim_start > 0.01 else 0.0
@@ -975,29 +1139,35 @@ def _transparent_pipeline(
 
     osd_trimmed_warning = ""
     if osd_data and not osd_in_window:
-        osd_trimmed_warning = "No OSD elements in trim window — rendered without OSD overlay"
+        osd_trimmed_warning = "No OSD elements in trim window — rendered onto plain key colour"
         if progress_callback:
             progress_callback(0, f"⚠ {osd_trimmed_warning}")
 
     if progress_callback:
-        progress_callback(5, f"{width}×{height} @ {fps}fps · {n_out_frames} frames · {enc_label}")
+        progress_callback(3, f"{width}×{height} @ {fps}fps · {n_out_frames} frames · {enc_label}")
 
-    # PTS extraction for frame-accurate sync
-    pts_list = get_frame_pts(config.input_video, _t_start)
+    _hb = _ProgressHeartbeat(progress_callback, start=4, cap=7,
+                             message=f"Reading frame timestamps…  [{enc_label}]").start()
+    try:
+        pts_list = get_frame_pts(config.input_video, _t_start)
+    finally:
+        _hb.stop()
     use_pts  = len(pts_list) >= n_out_frames
 
-    # FFmpeg command: rawvideo RGBA input → VP9 with alpha
+    _hb = _ProgressHeartbeat(progress_callback, start=7, cap=9,
+                             message=f"Starting encoder…  [{enc_label}]").start()
+
+    # FFmpeg command: rawvideo RGB24 input → H.264 .mp4 (CRF 18)
     ffmpeg_cmd = [
         ffmpeg, "-y",
-        "-f", "rawvideo", "-pix_fmt", "rgba",
+        "-f", "rawvideo", "-pix_fmt", "rgb24",
         "-s", f"{width}x{height}",
         "-r", str(fps),
         "-i", "pipe:0",
-        "-c:v", "libvpx-vp9",
-        "-pix_fmt", "yuva420p",
-        "-b:v", "0", "-crf", "18",
-        "-deadline", "good", "-cpu-used", "4",
-        "-auto-alt-ref", "0",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-preset", "medium", "-crf", "18",
+        "-movflags", "+faststart",
         "-an",
         config.output_video,
     ]
@@ -1009,14 +1179,15 @@ def _transparent_pipeline(
     threading.Thread(target=_drain, args=(ffmpeg_proc.stderr, ffmpeg_stderr),
                      daemon=True).start()
 
-    # Render loop — same logic as _overlay_pipeline
     _frame_cache: dict = {}
-    report_every = max(1, n_out_frames // 50)
+    report_every = max(1, n_out_frames // 100)
+
+    _hb.stop()
 
     try:
         if osd_data and not osd_in_window and not srt_data:
-            # Nothing to render — single blank frame
-            ffmpeg_proc.stdin.write(bytes(renderer.composite(None, "")))
+            # Nothing to render — single solid magenta frame
+            ffmpeg_proc.stdin.write(_flatten(renderer.composite(None, "")))
         else:
             for i in range(n_out_frames):
                 t_sec    = pts_list[i] if use_pts else i / fps
@@ -1036,13 +1207,13 @@ def _transparent_pipeline(
                 if cache_key not in _frame_cache:
                     if len(_frame_cache) >= _CACHE_MAX:
                         del _frame_cache[next(iter(_frame_cache))]
-                    _frame_cache[cache_key] = bytes(
+                    _frame_cache[cache_key] = _flatten(
                         renderer.composite(osd_frame, srt_text))
 
                 ffmpeg_proc.stdin.write(_frame_cache[cache_key])
 
                 if progress_callback and (i % report_every == 0 or i == n_out_frames - 1):
-                    pct = min(5 + int(i / n_out_frames * 85), 90)
+                    pct = min(10 + int((i + 1) / n_out_frames * 80), 90)
                     progress_callback(pct,
                         f"Frame {i+1}/{n_out_frames}  ({abs_t_ms/1000:.1f}s)  [{enc_label}]")
 
@@ -1063,7 +1234,7 @@ def _transparent_pipeline(
 
     if ffmpeg_proc.returncode not in (0, None):
         err = ffmpeg_stderr[0]
-        raise RuntimeError(f"ProRes encode failed (exit {ffmpeg_proc.returncode}):\n{err[-2000:]}")
+        raise RuntimeError(f"Chroma key encode failed (exit {ffmpeg_proc.returncode}):\n{err[-2000:]}")
 
     if progress_callback:
         progress_callback(100, f"✓ Done  [{enc_label}]")

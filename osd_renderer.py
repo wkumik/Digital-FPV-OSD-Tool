@@ -51,6 +51,12 @@ class OsdRenderConfig:
     # should be skipped at composite time. Stored grid-relative so they stay
     # pinned to the OSD elements regardless of scale/offset changes.
     hide_regions:  List[HideRegion] = field(default_factory=list)
+    # When the canvas (output buffer) is larger than the original source video
+    # — e.g. pillarboxed 4:3→16:9 — these tell the renderer the source area's
+    # dimensions so glyphs can be sized & centred against the source rather
+    # than the padded canvas. 0 = canvas is the source (no padding).
+    source_w:      int   = 0
+    source_h:      int   = 0
 
 
 def cell_in_regions(row: int, col: int, regions: List[HideRegion]) -> bool:
@@ -61,19 +67,35 @@ def cell_in_regions(row: int, col: int, regions: List[HideRegion]) -> bool:
     return False
 
 
-def _auto_scale(video_w: int, video_h: int, tile_w: int, tile_h: int,
+def _auto_scale(canvas_w: int, canvas_h: int, tile_w: int, tile_h: int,
                 user_scale: float = 1.0,
                 grid_cols: int = GRID_COLS,
-                grid_rows: int = GRID_ROWS) -> tuple[float, int, int]:
+                grid_rows: int = GRID_ROWS,
+                source_w: int = 0,
+                source_h: int = 0) -> tuple[float, int, int]:
     """
     Return (effective_scale, x_off, y_off).
-    Scaling origin is the screen centre — both offsets recalculated at every scale.
+
+    Scaling origin is the centre of the SOURCE video area inside the canvas.
+    When source_w/source_h are zero (or equal to canvas dims) this collapses to
+    the original behaviour: glyphs sized to canvas height, centred in canvas.
+    When the canvas is larger than the source (aspect-ratio padding), glyphs
+    are still sized against the source and centred on the source area, so the
+    user's X/Y offsets push them toward / into the black bars.
     """
-    base        = video_h / (grid_rows * tile_h)
+    if source_w <= 0:
+        source_w = canvas_w
+    if source_h <= 0:
+        source_h = canvas_h
+    base        = source_h / (grid_rows * tile_h)
     eff         = base * user_scale
     grid_w      = grid_cols * tile_w * eff
     grid_h      = grid_rows * tile_h * eff
-    return eff, int((video_w - grid_w) / 2), int((video_h - grid_h) / 2)
+    src_x       = (canvas_w - source_w) // 2
+    src_y       = (canvas_h - source_h) // 2
+    x_off       = src_x + int((source_w - grid_w) / 2)
+    y_off       = src_y + int((source_h - grid_h) / 2)
+    return eff, x_off, y_off
 
 
 # ─── PIL preview renderer (single-frame, used by Qt preview) ──────────────────
@@ -94,7 +116,8 @@ def render_osd_frame(
     if osd_frame is not None:
         eff, x0, y0 = _auto_scale(out.width, out.height,
                                    font.tile_w, font.tile_h, cfg.scale,
-                                   osd_frame.grid_cols, osd_frame.grid_rows)
+                                   osd_frame.grid_cols, osd_frame.grid_rows,
+                                   source_w=cfg.source_w, source_h=cfg.source_h)
         tw = max(1, int(font.tile_w * eff))
         th = max(1, int(font.tile_h * eff))
         x0 += cfg.offset_x
@@ -107,7 +130,7 @@ def render_osd_frame(
             glyph = font.get_char(code)
             if glyph is None:
                 continue
-            glyph = glyph.resize((tw, th), Image.NEAREST)
+            glyph = glyph.resize((tw, th), Image.LANCZOS)
             px, py = x0 + col * tw, y0 + row * th
             if px >= out.width or py >= out.height or px + tw <= 0 or py + th <= 0:
                 continue
@@ -215,7 +238,8 @@ class OsdRenderer:
         if font:
             eff, self.x0, self.y0 = _auto_scale(
                 video_w, video_h, font.tile_w, font.tile_h, cfg.scale,
-                grid_cols, grid_rows)
+                grid_cols, grid_rows,
+                source_w=cfg.source_w, source_h=cfg.source_h)
             self.x0 += cfg.offset_x
             self.y0 += cfg.offset_y
             self.tw = max(1, int(font.tile_w * eff))
