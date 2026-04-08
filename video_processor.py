@@ -258,6 +258,7 @@ class ProcessingConfig:
     osd_data:      object = None  # pre-parsed OsdFile (e.g. P1 embedded OSD)
     osd_offset_ms: int   = 0     # Manual OSD sync offset (ms); positive = OSD forward
     srt_enabled_fields: Optional[set] = None  # SRT field keys to show; None = all
+    hide_regions: list = None  # List of (r0,c0,r1,c1) OSD grid rects to blank
     color_config: Optional[ColorTransConfig] = None  # Color correction settings
     transparent_export: bool = False  # Export OSD-only with alpha (ProRes 4444 .mov)
 
@@ -722,6 +723,7 @@ def _overlay_pipeline(
         show_srt_bar= config.show_srt_bar,
         srt_opacity = config.srt_opacity,
         srt_scale   = config.srt_scale,
+        hide_regions = list(config.hide_regions or []),
     )
     gcols = osd_data.grid_cols if osd_data else GRID_COLS
     grows = osd_data.grid_rows if osd_data else GRID_ROWS
@@ -949,6 +951,7 @@ def _transparent_pipeline(
         show_srt_bar= config.show_srt_bar,
         srt_opacity = config.srt_opacity,
         srt_scale   = config.srt_scale,
+        hide_regions = list(config.hide_regions or []),
     )
     gcols = osd_data.grid_cols if osd_data else GRID_COLS
     grows = osd_data.grid_rows if osd_data else GRID_ROWS

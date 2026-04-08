@@ -76,6 +76,8 @@ class VideoCanvas(QWidget):
     """
 
     resized = pyqtSignal()  # emitted after resize so controller can re-render OSD
+    regionAdded = pyqtSignal(tuple)     # (r0, c0, r1, c1) in OSD grid coords
+    regionRemoveRequested = pyqtSignal(int)  # index into current regions list
 
     def __init__(self, theme_fn, fs_fn, parent=None):
         super().__init__(parent)
@@ -89,6 +91,18 @@ class VideoCanvas(QWidget):
         self._donate_rects = []
         self._show_placeholder = True
         self.setMouseTracking(True)
+        # ── Hide-region edit state ────────────────────────────────────────
+        # Modes: None = off, "add" = draw-to-add, "remove" = click-to-remove.
+        self._region_mode: str | None = None
+        self._region_regions: list[tuple[int, int, int, int]] = []
+        # Callback: canvas-space pixel (x, y) → (row, col) in OSD grid, or None.
+        # Supplied by MainWindow so the canvas stays agnostic of font/OSD state.
+        self._region_px_to_cell = None
+        # Callback: (row, col) → QRect in canvas coords for painting.
+        self._region_cell_to_px = None
+        self._region_drag_start: tuple[int, int] | None = None  # canvas px
+        self._region_drag_cur: tuple[int, int] | None = None
+        self._region_hover_idx: int = -1
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -145,6 +159,43 @@ class VideoCanvas(QWidget):
             return self._base_pixmap.width(), self._base_pixmap.height()
         return max(self.width(), 320), max(self.height(), 180)
 
+    def display_origin(self):
+        """Return (x, y) of the top-left of the base pixmap within the canvas."""
+        if self._base_pixmap is None:
+            return 0, 0
+        return ((self.width()  - self._base_pixmap.width())  // 2,
+                (self.height() - self._base_pixmap.height()) // 2)
+
+    # ── Hide-region edit API ──────────────────────────────────────────────────
+
+    def set_region_edit_mode(self, mode: str | None):
+        """Set region edit mode: None, 'add', or 'remove'.
+        When not None the canvas captures mouse events to draw/delete rects."""
+        self._region_mode = mode
+        self._region_drag_start = None
+        self._region_drag_cur = None
+        if mode == "add":
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        elif mode == "remove":
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_region_callbacks(self, px_to_cell, cell_to_px):
+        """Install geometry converters owned by MainWindow.
+
+        px_to_cell(x, y)      → (row, col) | None     (canvas px → OSD grid cell)
+        cell_to_px(r0,c0,r1,c1) → (x, y, w, h) | None (grid rect → canvas px rect)
+        """
+        self._region_px_to_cell = px_to_cell
+        self._region_cell_to_px = cell_to_px
+
+    def set_regions(self, regions: list[tuple[int, int, int, int]]):
+        """Update the list of hide regions drawn on the overlay."""
+        self._region_regions = list(regions or [])
+        self.update()
+
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _rebuild_base(self):
@@ -182,6 +233,8 @@ class VideoCanvas(QWidget):
             # OSD overlay on top (same size, same position)
             if self._osd_pixmap is not None:
                 p.drawPixmap(px, py, self._osd_pixmap)
+            # Hide-region overlay on top of the OSD
+            self._paint_regions(p, t)
 
         # Border
         p.setPen(QPen(QColor(t["border"]), 1))
@@ -324,6 +377,58 @@ class VideoCanvas(QWidget):
                 QRect(lx, heart_y + heart_h + 24, lw, 16),
             ]
 
+    def _paint_regions(self, p: QPainter, t: dict):
+        """Draw existing hide regions + the in-progress drag rectangle."""
+        if not self._region_regions and self._region_drag_start is None \
+                and self._region_mode is None:
+            return
+        cell_to_px = self._region_cell_to_px
+        # Saved regions
+        if cell_to_px is not None:
+            for i, reg in enumerate(self._region_regions):
+                rect = cell_to_px(*reg)
+                if rect is None:
+                    continue
+                x, y, w, h = rect
+                qr = QRect(x, y, w, h)
+                # Translucent red fill + solid border
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(255, 80, 80, 70))
+                p.drawRect(qr)
+                pen_col = QColor(255, 120, 120,
+                                 220 if i == self._region_hover_idx else 180)
+                pen = QPen(pen_col, 2 if i == self._region_hover_idx else 1)
+                pen.setStyle(Qt.PenStyle.SolidLine)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(qr)
+        # In-progress drag rectangle
+        if self._region_mode == "add" and self._region_drag_start and self._region_drag_cur:
+            x0, y0 = self._region_drag_start
+            x1, y1 = self._region_drag_cur
+            rx = min(x0, x1); ry = min(y0, y1)
+            rw = abs(x1 - x0); rh = abs(y1 - y0)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 200, 80, 60))
+            p.drawRect(rx, ry, rw, rh)
+            pen = QPen(QColor(255, 200, 80, 230), 1, Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(rx, ry, rw, rh)
+
+    def _region_hit_test(self, x: int, y: int) -> int:
+        """Return index of region whose painted rect contains (x, y), else -1."""
+        if not self._region_regions or self._region_cell_to_px is None:
+            return -1
+        for i, reg in enumerate(self._region_regions):
+            rect = self._region_cell_to_px(*reg)
+            if rect is None:
+                continue
+            rx, ry, rw, rh = rect
+            if rx <= x < rx + rw and ry <= y < ry + rh:
+                return i
+        return -1
+
     def resizeEvent(self, e):
         super().resizeEvent(e)
         if self._base_pil is not None:
@@ -333,19 +438,62 @@ class VideoCanvas(QWidget):
         self.update()
 
     def mousePressEvent(self, event):
+        pos = event.position().toPoint()
+        if self._region_mode == "add" and event.button() == Qt.MouseButton.LeftButton:
+            self._region_drag_start = (pos.x(), pos.y())
+            self._region_drag_cur   = (pos.x(), pos.y())
+            self.update()
+            return
+        if self._region_mode == "remove" and event.button() == Qt.MouseButton.LeftButton:
+            idx = self._region_hit_test(pos.x(), pos.y())
+            if idx >= 0:
+                self.regionRemoveRequested.emit(idx)
+            return
         if self._show_placeholder and self._donate_rects:
-            pos = event.position().toPoint()
             if any(r.contains(pos) for r in self._donate_rects):
                 QDesktopServices.openUrl(QUrl(_DONATE_URL))
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        pos = event.position().toPoint()
+        if self._region_mode == "add" and self._region_drag_start is not None:
+            self._region_drag_cur = (pos.x(), pos.y())
+            self.update()
+            return
+        if self._region_mode == "remove":
+            new_idx = self._region_hit_test(pos.x(), pos.y())
+            if new_idx != self._region_hover_idx:
+                self._region_hover_idx = new_idx
+                self.update()
+            return
+        if self._region_hover_idx != -1:
+            self._region_hover_idx = -1
+            self.update()
         if self._show_placeholder:
-            pos = event.position().toPoint()
             in_zone = any(r.contains(pos) for r in self._donate_rects)
             self.setCursor(Qt.CursorShape.PointingHandCursor if in_zone
                            else Qt.CursorShape.ArrowCursor)
         super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._region_mode == "add" and self._region_drag_start is not None \
+                and event.button() == Qt.MouseButton.LeftButton:
+            x0, y0 = self._region_drag_start
+            pos = event.position().toPoint()
+            x1, y1 = pos.x(), pos.y()
+            self._region_drag_start = None
+            self._region_drag_cur = None
+            if abs(x1 - x0) >= 3 and abs(y1 - y0) >= 3 \
+                    and self._region_px_to_cell is not None:
+                c_a = self._region_px_to_cell(x0, y0)
+                c_b = self._region_px_to_cell(x1, y1)
+                if c_a is not None and c_b is not None:
+                    r0 = min(c_a[0], c_b[0]); r1 = max(c_a[0], c_b[0])
+                    c0 = min(c_a[1], c_b[1]); c1 = max(c_a[1], c_b[1])
+                    self.regionAdded.emit((r0, c0, r1, c1))
+            self.update()
+            return
+        super().mouseReleaseEvent(event)
 
 
 # ─── Timeline ─────────────────────────────────────────────────────────────────

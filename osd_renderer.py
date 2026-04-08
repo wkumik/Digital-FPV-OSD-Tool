@@ -18,10 +18,14 @@ Two code paths:
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, List, Tuple
 
 import numpy as np
+
+# A hide region is an inclusive rectangle in OSD grid coordinates:
+#   (row_min, col_min, row_max, col_max)
+HideRegion = Tuple[int, int, int, int]
 
 try:
     from PIL import Image, ImageDraw, ImageFont as PILFont
@@ -43,6 +47,18 @@ class OsdRenderConfig:
     srt_opacity:   float = 0.6   # SRT bar background opacity (0.0–1.0)
     srt_scale:     float = 1.0   # SRT bar font/size multiplier (0.50–2.0)
     osd_offset_ms: int   = 0     # Manual sync offset (ms); applied to timestamp lookups
+    # Rectangular regions (in OSD grid coordinates, inclusive) whose glyphs
+    # should be skipped at composite time. Stored grid-relative so they stay
+    # pinned to the OSD elements regardless of scale/offset changes.
+    hide_regions:  List[HideRegion] = field(default_factory=list)
+
+
+def cell_in_regions(row: int, col: int, regions: List[HideRegion]) -> bool:
+    """Return True if grid cell (row, col) falls inside any hide region."""
+    for r0, c0, r1, c1 in regions:
+        if r0 <= row <= r1 and c0 <= col <= c1:
+            return True
+    return False
 
 
 def _auto_scale(video_w: int, video_h: int, tile_w: int, tile_h: int,
@@ -84,7 +100,10 @@ def render_osd_frame(
         x0 += cfg.offset_x
         y0 += cfg.offset_y
 
+        hide_regions = cfg.hide_regions or []
         for row, col, code in osd_frame.non_empty():
+            if hide_regions and cell_in_regions(row, col, hide_regions):
+                continue
             glyph = font.get_char(code)
             if glyph is None:
                 continue
@@ -118,7 +137,10 @@ def render_fallback(
         cw = max(8, out.width  // osd_frame.grid_cols)
         ch = max(8, out.height // osd_frame.grid_rows)
         x0, y0 = cfg.offset_x, cfg.offset_y
+        hide_regions = cfg.hide_regions or []
         for row, col, code in osd_frame.non_empty():
+            if hide_regions and cell_in_regions(row, col, hide_regions):
+                continue
             label = chr(code) if 32 <= code < 127 else "·"
             px, py = x0 + col * cw, y0 + row * ch
             draw.text((px+1, py+1), label, font=pil_f, fill=(0,0,0,200))
@@ -217,6 +239,22 @@ class OsdRenderer:
         # 8.3 MB numpy allocation × n_frames (e.g. 36 GB for a 1h 1080p60 render)
         self._frame_buf = np.zeros((video_h, video_w, 4), dtype=np.uint8)
 
+        # Pre-compute a boolean hide-mask over the grid so per-glyph checks
+        # are O(1) in the hot loop, regardless of how many regions exist.
+        self._hide_mask: Optional[np.ndarray] = None
+        if cfg.hide_regions:
+            mask = np.zeros((grid_rows, grid_cols), dtype=bool)
+            for r0, c0, r1, c1 in cfg.hide_regions:
+                r0c = max(0, min(grid_rows - 1, int(r0)))
+                r1c = max(0, min(grid_rows - 1, int(r1)))
+                c0c = max(0, min(grid_cols - 1, int(c0)))
+                c1c = max(0, min(grid_cols - 1, int(c1)))
+                if r1c < r0c or c1c < c0c:
+                    continue
+                mask[r0c:r1c + 1, c0c:c1c + 1] = True
+            if mask.any():
+                self._hide_mask = mask
+
     # ── Glyph lookup ──────────────────────────────────────────────────────────
 
     def _get_glyph(self, code: int) -> Optional[tuple[np.ndarray, np.ndarray]]:
@@ -284,7 +322,11 @@ class OsdRenderer:
 
         # OSD glyphs (~0.1ms for ~7 glyphs)
         if osd_frame is not None and self.font is not None:
+            hide_mask = self._hide_mask
             for row, col, code in osd_frame.non_empty():
+                if hide_mask is not None and 0 <= row < hide_mask.shape[0] \
+                        and 0 <= col < hide_mask.shape[1] and hide_mask[row, col]:
+                    continue
                 cached = self._get_glyph(code)
                 if cached is None:
                     continue

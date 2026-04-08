@@ -927,6 +927,14 @@ class MainWindow(QMainWindow):
         # Wire refresh button
         self._player_panel.transport.refreshClicked.connect(self._refresh_preview)
 
+        # Wire hide-region canvas signals + geometry callbacks
+        _canvas = self._player_panel.canvas
+        _canvas.set_region_callbacks(self._region_px_to_cell,
+                                     self._region_cell_to_px)
+        _canvas.regionAdded.connect(self._on_region_added)
+        _canvas.regionRemoveRequested.connect(self._on_region_remove)
+        _canvas.resized.connect(self._sync_region_overlay)
+
         # Create frame_info alias for theme code
         self.frame_info = self._player_panel.transport.info_lbl
 
@@ -1006,7 +1014,55 @@ class MainWindow(QMainWindow):
         self._rst_pos_btn.clicked.connect(self._reset_pos)
         posgl.addWidget(self._rst_pos_btn)
 
+        # ── Hide OSD Regions ──────────────────────────────────────────────
+        hideg = QGroupBox("Hide OSD Regions")
+        hideg.setStyleSheet(GROUP_STYLE)
+        hidegl = QVBoxLayout(hideg)
+        hidegl.setSpacing(4)
+        hidegl.setContentsMargins(10, 16, 10, 10)
+
+        self.hide_enable_check = QCheckBox("Enable region masking")
+        self.hide_enable_check.setChecked(True)
+        self.hide_enable_check.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
+        self.hide_enable_check.stateChanged.connect(self._on_hide_enable_toggled)
+        hidegl.addWidget(self.hide_enable_check)
+
+        hide_btn_row = QHBoxLayout()
+        hide_btn_row.setSpacing(4)
+        self.hide_add_btn = QPushButton("＋ Add")
+        self.hide_add_btn.setCheckable(True)
+        self.hide_add_btn.setStyleSheet(BTN_SEC)
+        self.hide_add_btn.setFixedHeight(26)
+        self.hide_add_btn.toggled.connect(self._on_hide_add_toggled)
+        self.hide_remove_btn = QPushButton("− Remove")
+        self.hide_remove_btn.setCheckable(True)
+        self.hide_remove_btn.setStyleSheet(BTN_SEC)
+        self.hide_remove_btn.setFixedHeight(26)
+        self.hide_remove_btn.toggled.connect(self._on_hide_remove_toggled)
+        self.hide_clear_btn = QPushButton("Clear")
+        self.hide_clear_btn.setStyleSheet(BTN_SEC)
+        self.hide_clear_btn.setFixedHeight(26)
+        self.hide_clear_btn.clicked.connect(self._on_hide_clear)
+        hide_btn_row.addWidget(self.hide_add_btn)
+        hide_btn_row.addWidget(self.hide_remove_btn)
+        hide_btn_row.addWidget(self.hide_clear_btn)
+        hidegl.addLayout(hide_btn_row)
+
+        self.hide_count_lbl = QLabel("0 regions")
+        self.hide_count_lbl.setStyleSheet(f"color:{_T()['muted']};font-size:10px;")
+        hidegl.addWidget(self.hide_count_lbl)
+
+        hide_note = QLabel("Drag on the preview to blank OSD cells. "
+                           "Regions follow the OSD when you change scale or offset.")
+        hide_note.setStyleSheet(f"color:{_T()['muted']};font-size:10px;")
+        hide_note.setWordWrap(True)
+        hidegl.addWidget(hide_note)
+
+        # Runtime state
+        self._hide_regions: list[tuple[int, int, int, int]] = []
+
         below.addWidget(posg, 2)
+        below.addWidget(hideg, 2)
 
         # Info cards
         cards_widget = QWidget()
@@ -1738,9 +1794,57 @@ class MainWindow(QMainWindow):
             self.out_row.set_path(self._make_output_path(path))
         self.video_frame = None
         self._st("Reading video info\u2026")
+        self._load_project_state(path)
         self._vi = VideoInfoWorker(path)
         self._vi.result.connect(self._got_vid_info)
         self._vi.start()
+
+    # ── Per-project (per-video) state sidecar ─────────────────────────────
+
+    def _project_state_path(self, video_path: str | None = None) -> str | None:
+        p = video_path or (self.video_row.path if getattr(self, "video_row", None) else None)
+        if not p:
+            return None
+        try:
+            return str(Path(p).with_suffix(Path(p).suffix + ".vueosd.json"))
+        except Exception:
+            return None
+
+    def _load_project_state(self, video_path: str):
+        """Load per-video sidecar state (currently: hide_regions)."""
+        sp = self._project_state_path(video_path)
+        loaded: dict = {}
+        if sp and os.path.exists(sp):
+            try:
+                with open(sp) as f:
+                    loaded = json.load(f) or {}
+            except Exception:
+                loaded = {}
+        regions = loaded.get("hide_regions") or []
+        self._hide_regions = [tuple(int(v) for v in r) for r in regions
+                              if isinstance(r, (list, tuple)) and len(r) == 4]
+        enabled = loaded.get("hide_regions_enabled", True)
+        if getattr(self, "hide_enable_check", None):
+            self.hide_enable_check.blockSignals(True)
+            self.hide_enable_check.setChecked(bool(enabled))
+            self.hide_enable_check.blockSignals(False)
+            self._update_hide_count_lbl()
+        self._sync_region_overlay()
+
+    def _save_project_state(self):
+        sp = self._project_state_path()
+        if not sp:
+            return
+        data = {
+            "hide_regions": [list(r) for r in self._hide_regions],
+            "hide_regions_enabled": bool(
+                getattr(self, "hide_enable_check", None) and self.hide_enable_check.isChecked()),
+        }
+        try:
+            with open(sp, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
 
     def _got_vid_info(self, info):
         self.vid_card.clear()
@@ -1897,6 +2001,134 @@ class MainWindow(QMainWindow):
         """Refresh current frame with updated OSD composite settings."""
         self._player_panel.controller.refresh_now()
 
+    # ── Hide-region helpers ─────────────────────────────────────────────────
+
+    def _active_hide_regions(self) -> list:
+        """Return the regions list actually used by the renderer (empty if
+        the enable checkbox is off)."""
+        if not getattr(self, "hide_enable_check", None):
+            return []
+        if not self.hide_enable_check.isChecked():
+            return []
+        return list(self._hide_regions)
+
+    def _osd_grid_geometry(self):
+        """Return (x0, y0, tw, th, cols, rows) describing where the OSD grid
+        is drawn inside the current preview canvas (same math as the
+        renderer), or None if no frame/font is available."""
+        if not getattr(self, "_player_panel", None):
+            return None
+        canvas = self._player_panel.canvas
+        if canvas is None or not canvas.has_frame() or self.font_obj is None:
+            return None
+        disp_w, disp_h = canvas.display_size()
+        ox, oy = canvas.display_origin()
+        cols = self.osd_data.grid_cols if self.osd_data else GRID_COLS
+        rows = self.osd_data.grid_rows if self.osd_data else GRID_ROWS
+        # Match OsdRenderer._auto_scale: base = disp_h / (rows*tile_h)
+        tile_w = self.font_obj.tile_w
+        tile_h = self.font_obj.tile_h
+        base = disp_h / (rows * tile_h) if tile_h and rows else 1.0
+        eff = base * (self.sl_scale.value() / 100.0)
+        tw = max(1, int(tile_w * eff))
+        th = max(1, int(tile_h * eff))
+        ctrl = self._player_panel.controller
+        ratio = disp_h / ctrl.video_h if getattr(ctrl, "video_h", 0) else 1.0
+        user_x = int(self.sl_x.value() * ratio)
+        user_y = int(self.sl_y.value() * ratio)
+        x0 = ox + int((disp_w - cols * tw) / 2) + user_x
+        y0 = oy + int((disp_h - rows * th) / 2) + user_y
+        return x0, y0, tw, th, cols, rows
+
+    def _region_px_to_cell(self, x: int, y: int):
+        g = self._osd_grid_geometry()
+        if g is None:
+            return None
+        x0, y0, tw, th, cols, rows = g
+        col = (x - x0) // tw
+        row = (y - y0) // th
+        row = max(0, min(rows - 1, int(row)))
+        col = max(0, min(cols - 1, int(col)))
+        return (row, col)
+
+    def _region_cell_to_px(self, r0, c0, r1, c1):
+        g = self._osd_grid_geometry()
+        if g is None:
+            return None
+        x0, y0, tw, th, cols, rows = g
+        r0 = max(0, min(rows - 1, int(r0)))
+        r1 = max(0, min(rows - 1, int(r1)))
+        c0 = max(0, min(cols - 1, int(c0)))
+        c1 = max(0, min(cols - 1, int(c1)))
+        if r1 < r0 or c1 < c0:
+            return None
+        x = x0 + c0 * tw
+        y = y0 + r0 * th
+        w = (c1 - c0 + 1) * tw
+        h = (r1 - r0 + 1) * th
+        return (x, y, w, h)
+
+    def _sync_region_overlay(self):
+        """Push current regions + geometry to the canvas so the overlay
+        repaints. Called after regions, scale, offset, or video change."""
+        if not getattr(self, "_player_panel", None):
+            return
+        canvas = self._player_panel.canvas
+        canvas.set_regions(self._active_hide_regions())
+
+    def _update_hide_count_lbl(self):
+        n = len(self._hide_regions)
+        self.hide_count_lbl.setText(f"{n} region{'' if n == 1 else 's'}")
+
+    def _on_hide_enable_toggled(self, _state):
+        self._sync_region_overlay()
+        self._refresh_preview()
+        self._save_project_state()
+
+    def _on_hide_add_toggled(self, checked: bool):
+        if checked:
+            if self.hide_remove_btn.isChecked():
+                self.hide_remove_btn.blockSignals(True)
+                self.hide_remove_btn.setChecked(False)
+                self.hide_remove_btn.blockSignals(False)
+            self._player_panel.canvas.set_region_edit_mode("add")
+        elif not self.hide_remove_btn.isChecked():
+            self._player_panel.canvas.set_region_edit_mode(None)
+
+    def _on_hide_remove_toggled(self, checked: bool):
+        if checked:
+            if self.hide_add_btn.isChecked():
+                self.hide_add_btn.blockSignals(True)
+                self.hide_add_btn.setChecked(False)
+                self.hide_add_btn.blockSignals(False)
+            self._player_panel.canvas.set_region_edit_mode("remove")
+        elif not self.hide_add_btn.isChecked():
+            self._player_panel.canvas.set_region_edit_mode(None)
+
+    def _on_hide_clear(self):
+        if not self._hide_regions:
+            return
+        self._hide_regions = []
+        self._update_hide_count_lbl()
+        self._sync_region_overlay()
+        self._refresh_preview()
+        self._save_project_state()
+
+    def _on_region_added(self, region: tuple):
+        self._hide_regions.append(tuple(int(v) for v in region))
+        self._update_hide_count_lbl()
+        self._sync_region_overlay()
+        self._refresh_preview()
+        self._save_project_state()
+
+    def _on_region_remove(self, idx: int):
+        if 0 <= idx < len(self._hide_regions):
+            self._hide_regions.pop(idx)
+            self._update_hide_count_lbl()
+            self._sync_region_overlay()
+            self._refresh_preview()
+            self._save_project_state()
+
     def _composite(self, img, pct):
         """Composite OSD + SRT onto a video frame at given slider position."""
         ctrl = self._player_panel.controller
@@ -1914,6 +2146,7 @@ class MainWindow(QMainWindow):
             srt_text     = srt_text,
             srt_opacity  = self.srt_opacity_sl.value() / 100.0,
             srt_scale    = self.srt_size_sl.value() / 100.0,
+            hide_regions = self._active_hide_regions(),
         )
         gc = self.osd_data.grid_cols if self.osd_data else GRID_COLS
         gr = self.osd_data.grid_rows if self.osd_data else GRID_ROWS
@@ -1944,6 +2177,7 @@ class MainWindow(QMainWindow):
             srt_text     = srt_text,
             srt_opacity  = self.srt_opacity_sl.value() / 100.0,
             srt_scale    = self.srt_size_sl.value() / 100.0,
+            hide_regions = self._active_hide_regions(),
         )
         canvas = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
         gc = self.osd_data.grid_cols if self.osd_data else GRID_COLS
@@ -1966,6 +2200,7 @@ class MainWindow(QMainWindow):
 
     def _queue_preview(self):
         """Debounced preview refresh — fires 60ms after sliders stop moving."""
+        self._sync_region_overlay()
         self._player_panel.controller.queue_refresh()
 
     # ── Color Correction ─────────────────────────────────────────────────────
@@ -2562,6 +2797,7 @@ class MainWindow(QMainWindow):
             upscale_target = upscale_target,
             osd_offset_ms = self.osd_offset_sb.value(),
             srt_enabled_fields = self.srt_fields_combo.checked_keys(),
+            hide_regions = self._active_hide_regions(),
             color_config = self._get_color_config() if self.cc_enable.isChecked() and not self.transparent_check.isChecked() else None,
             transparent_export = self.transparent_check.isChecked(),
         )
