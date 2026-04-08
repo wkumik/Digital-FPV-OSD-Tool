@@ -18,10 +18,14 @@ Two code paths:
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, List, Tuple
 
 import numpy as np
+
+# A hide region is an inclusive rectangle in OSD grid coordinates:
+#   (row_min, col_min, row_max, col_max)
+HideRegion = Tuple[int, int, int, int]
 
 try:
     from PIL import Image, ImageDraw, ImageFont as PILFont
@@ -43,21 +47,55 @@ class OsdRenderConfig:
     srt_opacity:   float = 0.6   # SRT bar background opacity (0.0–1.0)
     srt_scale:     float = 1.0   # SRT bar font/size multiplier (0.50–2.0)
     osd_offset_ms: int   = 0     # Manual sync offset (ms); applied to timestamp lookups
+    # Rectangular regions (in OSD grid coordinates, inclusive) whose glyphs
+    # should be skipped at composite time. Stored grid-relative so they stay
+    # pinned to the OSD elements regardless of scale/offset changes.
+    hide_regions:  List[HideRegion] = field(default_factory=list)
+    # When the canvas (output buffer) is larger than the original source video
+    # — e.g. pillarboxed 4:3→16:9 — these tell the renderer the source area's
+    # dimensions so glyphs can be sized & centred against the source rather
+    # than the padded canvas. 0 = canvas is the source (no padding).
+    source_w:      int   = 0
+    source_h:      int   = 0
 
 
-def _auto_scale(video_w: int, video_h: int, tile_w: int, tile_h: int,
+def cell_in_regions(row: int, col: int, regions: List[HideRegion]) -> bool:
+    """Return True if grid cell (row, col) falls inside any hide region."""
+    for r0, c0, r1, c1 in regions:
+        if r0 <= row <= r1 and c0 <= col <= c1:
+            return True
+    return False
+
+
+def _auto_scale(canvas_w: int, canvas_h: int, tile_w: int, tile_h: int,
                 user_scale: float = 1.0,
                 grid_cols: int = GRID_COLS,
-                grid_rows: int = GRID_ROWS) -> tuple[float, int, int]:
+                grid_rows: int = GRID_ROWS,
+                source_w: int = 0,
+                source_h: int = 0) -> tuple[float, int, int]:
     """
     Return (effective_scale, x_off, y_off).
-    Scaling origin is the screen centre — both offsets recalculated at every scale.
+
+    Scaling origin is the centre of the SOURCE video area inside the canvas.
+    When source_w/source_h are zero (or equal to canvas dims) this collapses to
+    the original behaviour: glyphs sized to canvas height, centred in canvas.
+    When the canvas is larger than the source (aspect-ratio padding), glyphs
+    are still sized against the source and centred on the source area, so the
+    user's X/Y offsets push them toward / into the black bars.
     """
-    base        = video_h / (grid_rows * tile_h)
+    if source_w <= 0:
+        source_w = canvas_w
+    if source_h <= 0:
+        source_h = canvas_h
+    base        = source_h / (grid_rows * tile_h)
     eff         = base * user_scale
     grid_w      = grid_cols * tile_w * eff
     grid_h      = grid_rows * tile_h * eff
-    return eff, int((video_w - grid_w) / 2), int((video_h - grid_h) / 2)
+    src_x       = (canvas_w - source_w) // 2
+    src_y       = (canvas_h - source_h) // 2
+    x_off       = src_x + int((source_w - grid_w) / 2)
+    y_off       = src_y + int((source_h - grid_h) / 2)
+    return eff, x_off, y_off
 
 
 # ─── PIL preview renderer (single-frame, used by Qt preview) ──────────────────
@@ -78,17 +116,21 @@ def render_osd_frame(
     if osd_frame is not None:
         eff, x0, y0 = _auto_scale(out.width, out.height,
                                    font.tile_w, font.tile_h, cfg.scale,
-                                   osd_frame.grid_cols, osd_frame.grid_rows)
+                                   osd_frame.grid_cols, osd_frame.grid_rows,
+                                   source_w=cfg.source_w, source_h=cfg.source_h)
         tw = max(1, int(font.tile_w * eff))
         th = max(1, int(font.tile_h * eff))
         x0 += cfg.offset_x
         y0 += cfg.offset_y
 
+        hide_regions = cfg.hide_regions or []
         for row, col, code in osd_frame.non_empty():
+            if hide_regions and cell_in_regions(row, col, hide_regions):
+                continue
             glyph = font.get_char(code)
             if glyph is None:
                 continue
-            glyph = glyph.resize((tw, th), Image.NEAREST)
+            glyph = glyph.resize((tw, th), Image.LANCZOS)
             px, py = x0 + col * tw, y0 + row * th
             if px >= out.width or py >= out.height or px + tw <= 0 or py + th <= 0:
                 continue
@@ -118,7 +160,10 @@ def render_fallback(
         cw = max(8, out.width  // osd_frame.grid_cols)
         ch = max(8, out.height // osd_frame.grid_rows)
         x0, y0 = cfg.offset_x, cfg.offset_y
+        hide_regions = cfg.hide_regions or []
         for row, col, code in osd_frame.non_empty():
+            if hide_regions and cell_in_regions(row, col, hide_regions):
+                continue
             label = chr(code) if 32 <= code < 127 else "·"
             px, py = x0 + col * cw, y0 + row * ch
             draw.text((px+1, py+1), label, font=pil_f, fill=(0,0,0,200))
@@ -193,7 +238,8 @@ class OsdRenderer:
         if font:
             eff, self.x0, self.y0 = _auto_scale(
                 video_w, video_h, font.tile_w, font.tile_h, cfg.scale,
-                grid_cols, grid_rows)
+                grid_cols, grid_rows,
+                source_w=cfg.source_w, source_h=cfg.source_h)
             self.x0 += cfg.offset_x
             self.y0 += cfg.offset_y
             self.tw = max(1, int(font.tile_w * eff))
@@ -216,6 +262,22 @@ class OsdRenderer:
         # Pre-allocated output buffer — reused every frame to avoid
         # 8.3 MB numpy allocation × n_frames (e.g. 36 GB for a 1h 1080p60 render)
         self._frame_buf = np.zeros((video_h, video_w, 4), dtype=np.uint8)
+
+        # Pre-compute a boolean hide-mask over the grid so per-glyph checks
+        # are O(1) in the hot loop, regardless of how many regions exist.
+        self._hide_mask: Optional[np.ndarray] = None
+        if cfg.hide_regions:
+            mask = np.zeros((grid_rows, grid_cols), dtype=bool)
+            for r0, c0, r1, c1 in cfg.hide_regions:
+                r0c = max(0, min(grid_rows - 1, int(r0)))
+                r1c = max(0, min(grid_rows - 1, int(r1)))
+                c0c = max(0, min(grid_cols - 1, int(c0)))
+                c1c = max(0, min(grid_cols - 1, int(c1)))
+                if r1c < r0c or c1c < c0c:
+                    continue
+                mask[r0c:r1c + 1, c0c:c1c + 1] = True
+            if mask.any():
+                self._hide_mask = mask
 
     # ── Glyph lookup ──────────────────────────────────────────────────────────
 
@@ -284,7 +346,11 @@ class OsdRenderer:
 
         # OSD glyphs (~0.1ms for ~7 glyphs)
         if osd_frame is not None and self.font is not None:
+            hide_mask = self._hide_mask
             for row, col, code in osd_frame.non_empty():
+                if hide_mask is not None and 0 <= row < hide_mask.shape[0] \
+                        and 0 <= col < hide_mask.shape[1] and hide_mask[row, col]:
+                    continue
                 cached = self._get_glyph(code)
                 if cached is None:
                     continue

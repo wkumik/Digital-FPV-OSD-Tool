@@ -113,9 +113,27 @@ def _run_in_thread_with_progress(fn, app, splash, start_prog, end_prog, label):
         raise error[0]
 
 
+def _install_qt_excepthook():
+    """Catch any exception that escapes during the event loop and surface it
+    via the tkinter error dialog. Without this, pythonw silently eats Qt slot
+    exceptions and the user just sees the splash disappear into nothing."""
+    def _hook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            return
+        msg = "".join(traceback.format_exception(exc_type, exc, tb))
+        try:
+            with open(os.path.join(HERE, "vueosd_crash.log"), "w") as f:
+                f.write(msg)
+        except Exception:
+            pass
+        _show_error("VueOSD crashed:\n\n" + msg[-4000:])
+    sys.excepthook = _hook
+
+
 def _run_with_splash():
     # ── Close the HTA — PyQt6 splash takes over immediately ───────────────────
     _hta_close()
+    _install_qt_excepthook()
 
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtGui     import QIcon

@@ -59,7 +59,7 @@ _DARK_THEME = True   # module-level flag; toggled by the theme button
 
 # ─── Version & UI scale ───────────────────────────────────────────────────────
 
-VERSION = "1.5"
+VERSION = "1.6"
 
 _UI_SCALE = 1.0
 _SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -704,77 +704,92 @@ class MainWindow(QMainWindow):
         ll.setContentsMargins(14, 16, 10, 16)
         ll.setSpacing(10)
 
-        # Header: title + theme toggle button on the same row
+        # ── Header: app icon + branding stack + utility buttons ───────────────
         hdr_row = QHBoxLayout()
         hdr_row.setContentsMargins(0, 0, 0, 0)
-        hdr_row.setSpacing(8)
+        hdr_row.setSpacing(10)
+
+        # App icon (left)
+        _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "assets", "icon.png")
+        app_icon_lbl = QLabel()
+        if os.path.exists(_icon_path):
+            pix = QPixmap(_icon_path).scaled(
+                36, 36, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+            app_icon_lbl.setPixmap(pix)
+        app_icon_lbl.setFixedSize(36, 36)
+        self._app_icon_lbl = app_icon_lbl
+
+        # Title + version badge inline
+        title_box = QHBoxLayout()
+        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setSpacing(6)
 
         h1 = QLabel("VueOSD")
-        h1.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        h1.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
         h1.setStyleSheet(f"color:{_T()['text']};")
         self._h1 = h1
 
-        h2 = QLabel("Digital FPV OSD Tool")
-        h2.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
-        h2.setStyleSheet(f"color:{_T()['text']};")
-        h2.setAlignment(Qt.AlignmentFlag.AlignBottom)
-        self._h2 = h2
-
         ver = QLabel(f"v{VERSION}")
-        ver.setFont(QFont("Segoe UI", _fs(8)))
+        ver.setFont(QFont("Segoe UI", _fs(10)))
         ver.setStyleSheet(f"color:{_T()['muted']};")
-        ver.setAlignment(Qt.AlignmentFlag.AlignBottom)
-        self._ver_lbl = ver
+        self._h2 = ver
+        self._ver_lbl = ver  # legacy alias for theme reapply code
 
-        self._theme_btn = QPushButton()
-        self._theme_btn.setFixedSize(30, 30)
-        self._theme_btn.setToolTip("Toggle light / dark theme")
-        self._theme_btn.setStyleSheet(
-            f"QPushButton{{background:transparent;border:none;border-radius:15px;}}"
+        title_box.addWidget(h1, 0, Qt.AlignmentFlag.AlignVCenter)
+        title_box.addWidget(ver, 0, Qt.AlignmentFlag.AlignVCenter)
+        title_box.addStretch()
+
+        # Utility buttons (right)
+        _btn_css = (
+            f"QPushButton{{background:transparent;border:none;border-radius:14px;"
+            f"padding:0;}}"
             f"QPushButton:hover{{background:{_T()['surface']};}}"
         )
-        self._theme_btn.setIcon(_icon("moon-dark.png", 18))
+
+        self._theme_btn = QPushButton()
+        self._theme_btn.setFixedSize(28, 28)
+        self._theme_btn.setToolTip("Toggle light / dark theme")
+        self._theme_btn.setStyleSheet(_btn_css)
+        self._theme_btn.setIcon(_icon("moon-dark.png", 16))
         self._theme_btn.clicked.connect(self._toggle_theme)
 
         self._palette_btn = QPushButton()
-        self._palette_btn.setFixedSize(30, 30)
+        self._palette_btn.setFixedSize(28, 28)
         self._palette_btn.setToolTip("Open theme colour editor")
-        self._palette_btn.setStyleSheet(
-            f"QPushButton{{background:transparent;border:none;border-radius:15px;}}"
-            f"QPushButton:hover{{background:{_T()['surface']};}}"
-        )
+        self._palette_btn.setStyleSheet(_btn_css)
         self._palette_btn.setText("🎨")
-        self._palette_btn.setFont(QFont("Segoe UI", 14))
+        self._palette_btn.setFont(QFont("Segoe UI", 13))
         self._palette_btn.clicked.connect(self._open_theme_editor)
         self._theme_editor_dlg = None   # lazily created
 
-        hdr_row.addWidget(h1)
-        hdr_row.addWidget(h2)
-        hdr_row.addWidget(ver)
-        hdr_row.addStretch()
-        hdr_row.addWidget(self._palette_btn)
-        hdr_row.addWidget(self._theme_btn)
-        ll.addLayout(hdr_row)
-
-        # ── UI Scale selector ─────────────────────────────────────────────────
-        scale_row = QHBoxLayout()
-        scale_row.setContentsMargins(0, 2, 0, 0)
-        scale_row.setSpacing(6)
-        scale_lbl = QLabel("UI Scale")
-        scale_lbl.setStyleSheet(f"color:{_T()['muted']};font-size:{_fs(10)}px;")
-        self._scale_lbl = scale_lbl
+        # Compact UI scale combo on the same row
         self._scale_cb = QComboBox()
         self._scale_cb.addItems(["100%", "125%", "150%", "175%"])
         _scale_vals = [1.0, 1.25, 1.5, 1.75]
         _scale_idx = min(range(len(_scale_vals)), key=lambda i: abs(_scale_vals[i] - _UI_SCALE))
         self._scale_cb.setCurrentIndex(_scale_idx)
-        self._scale_cb.setFixedWidth(72)
-        self._scale_cb.setStyleSheet(COMBO_STYLE)
+        self._scale_cb.setFixedSize(64, 28)
+        self._scale_cb.setStyleSheet(
+            f"QComboBox{{background:transparent;color:{_T()['muted']};"
+            f"border:1px solid {_T()['border2']};border-radius:6px;"
+            f"padding:2px 6px;font-size:{_fs(10)}px;}}"
+            f"QComboBox:hover{{color:{_T()['text']};border-color:{_T()['border']};}}"
+            f"QComboBox::drop-down{{border:none;width:14px;}}"
+        )
+        self._scale_cb.setToolTip("UI scale")
         self._scale_cb.currentIndexChanged.connect(self._on_scale_changed)
-        scale_row.addWidget(scale_lbl)
-        scale_row.addWidget(self._scale_cb)
-        scale_row.addStretch()
-        ll.addLayout(scale_row)
+        # legacy alias for theme reapply code
+        self._scale_lbl = QLabel("")
+        self._scale_lbl.hide()
+
+        hdr_row.addWidget(app_icon_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        hdr_row.addLayout(title_box, 1)
+        hdr_row.addWidget(self._scale_cb, 0, Qt.AlignmentFlag.AlignVCenter)
+        hdr_row.addWidget(self._palette_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        hdr_row.addWidget(self._theme_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        ll.addLayout(hdr_row)
 
         # ── Files group ───────────────────────────────────────────────────────
         fg = QGroupBox("Files")
@@ -924,8 +939,18 @@ class MainWindow(QMainWindow):
         self._player_panel.timeline.trimChanged.connect(self._on_trim_changed)
         self._player_panel.timeline.trimChanged.connect(lambda *_: self._update_size_hint())
 
-        # Wire refresh button
+        # Wire refresh button + preview-quality combo
         self._player_panel.transport.refreshClicked.connect(self._refresh_preview)
+        self._player_panel.transport.previewQualityChanged.connect(
+            self._on_preview_quality_changed)
+
+        # Wire hide-region canvas signals + geometry callbacks
+        _canvas = self._player_panel.canvas
+        _canvas.set_region_callbacks(self._region_px_to_cell,
+                                     self._region_cell_to_px)
+        _canvas.regionAdded.connect(self._on_region_added)
+        _canvas.regionRemoveRequested.connect(self._on_region_remove)
+        _canvas.resized.connect(self._sync_region_overlay)
 
         # Create frame_info alias for theme code
         self.frame_info = self._player_panel.transport.info_lbl
@@ -961,8 +986,8 @@ class MainWindow(QMainWindow):
         pos_note.setStyleSheet(f"color:{_T()['muted']};font-size:10px;")
         posgl.addWidget(pos_note)
 
-        self.sl_x     = LabeledSlider("X offset", -400, 400,   0, " px")
-        self.sl_y     = LabeledSlider("Y offset", -200, 200,   0, " px")
+        self.sl_x     = LabeledSlider("X offset", -1200, 1200, 0, " px")
+        self.sl_y     = LabeledSlider("Y offset",  -800,  800, 0, " px")
         self.sl_scale = LabeledSlider("Scale",      50, 150, 100, "%")
         for sl in (self.sl_x, self.sl_y, self.sl_scale):
             sl.valueChanged.connect(self._queue_preview)
@@ -1006,7 +1031,55 @@ class MainWindow(QMainWindow):
         self._rst_pos_btn.clicked.connect(self._reset_pos)
         posgl.addWidget(self._rst_pos_btn)
 
+        # ── Hide OSD Regions ──────────────────────────────────────────────
+        hideg = QGroupBox("Hide OSD Regions")
+        hideg.setStyleSheet(GROUP_STYLE)
+        hidegl = QVBoxLayout(hideg)
+        hidegl.setSpacing(4)
+        hidegl.setContentsMargins(10, 16, 10, 10)
+
+        self.hide_enable_check = QCheckBox("Enable region masking")
+        self.hide_enable_check.setChecked(True)
+        self.hide_enable_check.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
+        self.hide_enable_check.stateChanged.connect(self._on_hide_enable_toggled)
+        hidegl.addWidget(self.hide_enable_check)
+
+        hide_btn_row = QHBoxLayout()
+        hide_btn_row.setSpacing(4)
+        self.hide_add_btn = QPushButton("＋ Add")
+        self.hide_add_btn.setCheckable(True)
+        self.hide_add_btn.setStyleSheet(BTN_SEC)
+        self.hide_add_btn.setFixedHeight(26)
+        self.hide_add_btn.toggled.connect(self._on_hide_add_toggled)
+        self.hide_remove_btn = QPushButton("− Remove")
+        self.hide_remove_btn.setCheckable(True)
+        self.hide_remove_btn.setStyleSheet(BTN_SEC)
+        self.hide_remove_btn.setFixedHeight(26)
+        self.hide_remove_btn.toggled.connect(self._on_hide_remove_toggled)
+        self.hide_clear_btn = QPushButton("Clear")
+        self.hide_clear_btn.setStyleSheet(BTN_SEC)
+        self.hide_clear_btn.setFixedHeight(26)
+        self.hide_clear_btn.clicked.connect(self._on_hide_clear)
+        hide_btn_row.addWidget(self.hide_add_btn)
+        hide_btn_row.addWidget(self.hide_remove_btn)
+        hide_btn_row.addWidget(self.hide_clear_btn)
+        hidegl.addLayout(hide_btn_row)
+
+        self.hide_count_lbl = QLabel("0 regions")
+        self.hide_count_lbl.setStyleSheet(f"color:{_T()['muted']};font-size:10px;")
+        hidegl.addWidget(self.hide_count_lbl)
+
+        hide_note = QLabel("Drag on the preview to blank OSD cells. "
+                           "Regions follow the OSD when you change scale or offset.")
+        hide_note.setStyleSheet(f"color:{_T()['muted']};font-size:10px;")
+        hide_note.setWordWrap(True)
+        hidegl.addWidget(hide_note)
+
+        # Runtime state
+        self._hide_regions: list[tuple[int, int, int, int]] = []
+
         below.addWidget(posg, 2)
+        below.addWidget(hideg, 2)
 
         # Info cards
         cards_widget = QWidget()
@@ -1300,16 +1373,35 @@ class MainWindow(QMainWindow):
         upscale_row.addWidget(self.upscale_combo, 1)
         encgl.addLayout(upscale_row)
 
+        # Aspect-ratio (letter/pillarbox) selector
+        aspect_row = QHBoxLayout()
+        self._aspect_lbl = QLabel("Aspect ratio:")
+        self._aspect_lbl.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
+        self.aspect_combo = QComboBox()
+        self.aspect_combo.addItems(["Source", "16:9", "4:3", "21:9", "1:1", "9:16"])
+        self.aspect_combo.setStyleSheet(COMBO_STYLE)
+        self.aspect_combo.setToolTip(
+            "Pad the video into a wider or taller canvas with black bars.\n"
+            "Use this to put a 4:3 source into a 16:9 frame and place OSD\n"
+            "elements inside the side bars (drag them out with the X offset)."
+        )
+        self.aspect_combo.currentIndexChanged.connect(self._on_aspect_changed)
+        aspect_row.addWidget(self._aspect_lbl)
+        aspect_row.addWidget(self.aspect_combo, 1)
+        encgl.addLayout(aspect_row)
+
         encgl.addWidget(_sep())
 
-        # Transparent overlay export
-        self.transparent_check = QCheckBox("Transparent overlay (VP9 alpha)")
+        # Chroma key export (OSD on solid magenta background, H.264 .mp4)
+        self.transparent_check = QCheckBox("Chroma key export (magenta)")
         self.transparent_check.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
         self.transparent_check.setToolTip(
-            "Export only the OSD glyphs and SRT bar as a video with\n"
-            "a transparent background (VP9 alpha, .webm).\n\n"
-            "Layer it on GoPro/action-cam footage in DaVinci Resolve,\n"
-            "Premiere Pro, or Final Cut Pro."
+            "Export only the OSD glyphs and SRT bar onto a solid magenta\n"
+            "background as a standard H.264 .mp4. Pull the magenta key in\n"
+            "DaVinci Resolve, Premiere Pro, or Final Cut Pro to layer the\n"
+            "OSD onto GoPro/action-cam footage.\n\n"
+            "Magenta is used because no FPV OSD glyphs ever contain it,\n"
+            "so the keyer can't eat any OSD content."
         )
         self.transparent_check.stateChanged.connect(self._on_transparent_changed)
         encgl.addWidget(self.transparent_check)
@@ -1375,6 +1467,51 @@ class MainWindow(QMainWindow):
 
     def _on_codec_changed(self):
         self._update_size_hint()
+
+    def _on_preview_quality_changed(self, idx: int):
+        """Toggle controller's full-quality preview decode mode."""
+        if not getattr(self, "_player_panel", None):
+            return
+        self._player_panel.controller.set_full_quality_preview(idx == 1)
+
+    def _on_aspect_changed(self, _idx):
+        """Aspect ratio dropdown changed: re-pad preview canvas + refresh."""
+        self._apply_aspect_to_canvas()
+        self._sync_region_overlay()
+        self._refresh_preview()
+
+    def _apply_aspect_to_canvas(self):
+        """Push current target aspect ratio into the player canvas."""
+        canvas = self._player_panel.canvas if getattr(self, "_player_panel", None) else None
+        if canvas is None:
+            return
+        target = self._current_target_aspect()
+        if not target or ":" not in target:
+            canvas.set_aspect_padding(0, 0)
+            return
+        try:
+            aw, ah = (int(p) for p in target.split(":", 1))
+            canvas.set_aspect_padding(aw, ah)
+        except Exception:
+            canvas.set_aspect_padding(0, 0)
+
+    def _current_target_aspect(self) -> str:
+        """Return the dropdown's value as a 'W:H' string, or '' for source."""
+        if not getattr(self, "aspect_combo", None):
+            return ""
+        txt = self.aspect_combo.currentText().strip()
+        return "" if txt == "Source" else txt
+
+    def _current_canvas_dims(self) -> tuple[int, int, int, int]:
+        """Return (canvas_w, canvas_h, src_x, src_y) for the current source
+        video + chosen aspect, or source dims if aspect is 'Source'."""
+        ctrl = self._player_panel.controller if getattr(self, "_player_panel", None) else None
+        sw = getattr(ctrl, "video_w", 0) or 0
+        sh = getattr(ctrl, "video_h", 0) or 0
+        if sw <= 0 or sh <= 0:
+            return 0, 0, 0, 0
+        from video_processor import compute_canvas_dims
+        return compute_canvas_dims(sw, sh, self._current_target_aspect())
 
     def _on_transparent_changed(self, state):
         """Toggle encoding controls when transparent overlay mode changes."""
@@ -1738,9 +1875,57 @@ class MainWindow(QMainWindow):
             self.out_row.set_path(self._make_output_path(path))
         self.video_frame = None
         self._st("Reading video info\u2026")
+        self._load_project_state(path)
         self._vi = VideoInfoWorker(path)
         self._vi.result.connect(self._got_vid_info)
         self._vi.start()
+
+    # ── Per-project (per-video) state sidecar ─────────────────────────────
+
+    def _project_state_path(self, video_path: str | None = None) -> str | None:
+        p = video_path or (self.video_row.path if getattr(self, "video_row", None) else None)
+        if not p:
+            return None
+        try:
+            return str(Path(p).with_suffix(Path(p).suffix + ".vueosd.json"))
+        except Exception:
+            return None
+
+    def _load_project_state(self, video_path: str):
+        """Load per-video sidecar state (currently: hide_regions)."""
+        sp = self._project_state_path(video_path)
+        loaded: dict = {}
+        if sp and os.path.exists(sp):
+            try:
+                with open(sp) as f:
+                    loaded = json.load(f) or {}
+            except Exception:
+                loaded = {}
+        regions = loaded.get("hide_regions") or []
+        self._hide_regions = [tuple(int(v) for v in r) for r in regions
+                              if isinstance(r, (list, tuple)) and len(r) == 4]
+        enabled = loaded.get("hide_regions_enabled", True)
+        if getattr(self, "hide_enable_check", None):
+            self.hide_enable_check.blockSignals(True)
+            self.hide_enable_check.setChecked(bool(enabled))
+            self.hide_enable_check.blockSignals(False)
+            self._update_hide_count_lbl()
+        self._sync_region_overlay()
+
+    def _save_project_state(self):
+        sp = self._project_state_path()
+        if not sp:
+            return
+        data = {
+            "hide_regions": [list(r) for r in self._hide_regions],
+            "hide_regions_enabled": bool(
+                getattr(self, "hide_enable_check", None) and self.hide_enable_check.isChecked()),
+        }
+        try:
+            with open(sp, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception:
+            pass
 
     def _got_vid_info(self, info):
         self.vid_card.clear()
@@ -1763,6 +1948,8 @@ class MainWindow(QMainWindow):
             self._player_panel.controller.load_video(
                 self.video_row.path, self.video_dur, self.video_fps,
                 info.get("width", 0), info.get("height", 0))
+            # Apply aspect padding spec now that source dims are known
+            self._apply_aspect_to_canvas()
         self._st("Ready")
 
     ## _start_prefetch, _prefetch_frames — removed (now in PlayerController)
@@ -1897,6 +2084,145 @@ class MainWindow(QMainWindow):
         """Refresh current frame with updated OSD composite settings."""
         self._player_panel.controller.refresh_now()
 
+    # ── Hide-region helpers ─────────────────────────────────────────────────
+
+    def _active_hide_regions(self) -> list:
+        """Return the regions list actually used by the renderer (empty if
+        the enable checkbox is off)."""
+        if not getattr(self, "hide_enable_check", None):
+            return []
+        if not self.hide_enable_check.isChecked():
+            return []
+        return list(self._hide_regions)
+
+    def _osd_grid_geometry(self):
+        """Return (x0, y0, tw, th, cols, rows) describing where the OSD grid
+        is drawn inside the current preview canvas (same math as the
+        renderer), or None if no frame/font is available."""
+        if not getattr(self, "_player_panel", None):
+            return None
+        canvas = self._player_panel.canvas
+        if canvas is None or not canvas.has_frame() or self.font_obj is None:
+            return None
+        disp_w, disp_h = canvas.display_size()
+        ox, oy = canvas.display_origin()
+        cols = self.osd_data.grid_cols if self.osd_data else GRID_COLS
+        rows = self.osd_data.grid_rows if self.osd_data else GRID_ROWS
+        ctrl = self._player_panel.controller
+        # Source video area within the (possibly padded) display canvas.
+        cw, ch, _sx, _sy = self._current_canvas_dims()
+        if cw > 0 and ch > 0 and ctrl.video_w > 0:
+            src_disp_w = int(round(ctrl.video_w * (disp_w / cw)))
+            src_disp_h = int(round(ctrl.video_h * (disp_h / ch)))
+        else:
+            src_disp_w = disp_w
+            src_disp_h = disp_h
+        src_disp_x = (disp_w - src_disp_w) // 2
+        src_disp_y = (disp_h - src_disp_h) // 2
+        tile_w = self.font_obj.tile_w
+        tile_h = self.font_obj.tile_h
+        base = src_disp_h / (rows * tile_h) if tile_h and rows else 1.0
+        eff = base * (self.sl_scale.value() / 100.0)
+        tw = max(1, int(tile_w * eff))
+        th = max(1, int(tile_h * eff))
+        # User offset is in source-pixel units; convert to display pixels via
+        # the same height ratio used by the OSD render.
+        ratio = src_disp_h / ctrl.video_h if getattr(ctrl, "video_h", 0) else 1.0
+        user_x = int(self.sl_x.value() * ratio)
+        user_y = int(self.sl_y.value() * ratio)
+        x0 = ox + src_disp_x + int((src_disp_w - cols * tw) / 2) + user_x
+        y0 = oy + src_disp_y + int((src_disp_h - rows * th) / 2) + user_y
+        return x0, y0, tw, th, cols, rows
+
+    def _region_px_to_cell(self, x: int, y: int):
+        g = self._osd_grid_geometry()
+        if g is None:
+            return None
+        x0, y0, tw, th, cols, rows = g
+        col = (x - x0) // tw
+        row = (y - y0) // th
+        row = max(0, min(rows - 1, int(row)))
+        col = max(0, min(cols - 1, int(col)))
+        return (row, col)
+
+    def _region_cell_to_px(self, r0, c0, r1, c1):
+        g = self._osd_grid_geometry()
+        if g is None:
+            return None
+        x0, y0, tw, th, cols, rows = g
+        r0 = max(0, min(rows - 1, int(r0)))
+        r1 = max(0, min(rows - 1, int(r1)))
+        c0 = max(0, min(cols - 1, int(c0)))
+        c1 = max(0, min(cols - 1, int(c1)))
+        if r1 < r0 or c1 < c0:
+            return None
+        x = x0 + c0 * tw
+        y = y0 + r0 * th
+        w = (c1 - c0 + 1) * tw
+        h = (r1 - r0 + 1) * th
+        return (x, y, w, h)
+
+    def _sync_region_overlay(self):
+        """Push current regions + geometry to the canvas so the overlay
+        repaints. Called after regions, scale, offset, or video change."""
+        if not getattr(self, "_player_panel", None):
+            return
+        canvas = self._player_panel.canvas
+        canvas.set_regions(self._active_hide_regions())
+
+    def _update_hide_count_lbl(self):
+        n = len(self._hide_regions)
+        self.hide_count_lbl.setText(f"{n} region{'' if n == 1 else 's'}")
+
+    def _on_hide_enable_toggled(self, _state):
+        self._sync_region_overlay()
+        self._refresh_preview()
+        self._save_project_state()
+
+    def _on_hide_add_toggled(self, checked: bool):
+        if checked:
+            if self.hide_remove_btn.isChecked():
+                self.hide_remove_btn.blockSignals(True)
+                self.hide_remove_btn.setChecked(False)
+                self.hide_remove_btn.blockSignals(False)
+            self._player_panel.canvas.set_region_edit_mode("add")
+        elif not self.hide_remove_btn.isChecked():
+            self._player_panel.canvas.set_region_edit_mode(None)
+
+    def _on_hide_remove_toggled(self, checked: bool):
+        if checked:
+            if self.hide_add_btn.isChecked():
+                self.hide_add_btn.blockSignals(True)
+                self.hide_add_btn.setChecked(False)
+                self.hide_add_btn.blockSignals(False)
+            self._player_panel.canvas.set_region_edit_mode("remove")
+        elif not self.hide_add_btn.isChecked():
+            self._player_panel.canvas.set_region_edit_mode(None)
+
+    def _on_hide_clear(self):
+        if not self._hide_regions:
+            return
+        self._hide_regions = []
+        self._update_hide_count_lbl()
+        self._sync_region_overlay()
+        self._refresh_preview()
+        self._save_project_state()
+
+    def _on_region_added(self, region: tuple):
+        self._hide_regions.append(tuple(int(v) for v in region))
+        self._update_hide_count_lbl()
+        self._sync_region_overlay()
+        self._refresh_preview()
+        self._save_project_state()
+
+    def _on_region_remove(self, idx: int):
+        if 0 <= idx < len(self._hide_regions):
+            self._hide_regions.pop(idx)
+            self._update_hide_count_lbl()
+            self._sync_region_overlay()
+            self._refresh_preview()
+            self._save_project_state()
+
     def _composite(self, img, pct):
         """Composite OSD + SRT onto a video frame at given slider position."""
         ctrl = self._player_panel.controller
@@ -1906,6 +2232,33 @@ class MainWindow(QMainWindow):
         if self.srt_data and self.srt_bar_check.isChecked():
             td = self.srt_data.get_data_at_time(t_ms)
             if td: srt_text = td.status_line(self.srt_fields_combo.checked_keys())
+        # Aspect padding: wrap source frame in black canvas before compositing.
+        # Pad rect is computed from the INPUT frame's actual size, since
+        # playback / scrub frames are decoded at scaled-down dims, not native.
+        src_w, src_h = img.width, img.height
+        target = self._current_target_aspect()
+        if target and ":" in target:
+            try:
+                aw, ah = (int(p) for p in target.split(":", 1))
+            except Exception:
+                aw = ah = 0
+            if aw > 0 and ah > 0:
+                target_ratio = aw / ah
+                src_ratio    = src_w / src_h
+                if abs(src_ratio - target_ratio) > 1e-3:
+                    if src_ratio < target_ratio:
+                        cw = int(round(src_h * target_ratio))
+                        ch = src_h
+                    else:
+                        cw = src_w
+                        ch = int(round(src_w / target_ratio))
+                    cw = (cw // 2) * 2
+                    ch = (ch // 2) * 2
+                    sx = (cw - src_w) // 2
+                    sy = (ch - src_h) // 2
+                    padded = PILImage.new("RGBA", (cw, ch), (0, 0, 0, 255))
+                    padded.paste(img.convert("RGBA") if img.mode != "RGBA" else img, (sx, sy))
+                    img = padded
         cfg = OsdRenderConfig(
             offset_x     = self.sl_x.value(),
             offset_y     = self.sl_y.value(),
@@ -1914,6 +2267,9 @@ class MainWindow(QMainWindow):
             srt_text     = srt_text,
             srt_opacity  = self.srt_opacity_sl.value() / 100.0,
             srt_scale    = self.srt_size_sl.value() / 100.0,
+            hide_regions = self._active_hide_regions(),
+            source_w     = src_w,
+            source_h     = src_h,
         )
         gc = self.osd_data.grid_cols if self.osd_data else GRID_COLS
         gr = self.osd_data.grid_rows if self.osd_data else GRID_ROWS
@@ -1933,9 +2289,18 @@ class MainWindow(QMainWindow):
         if self.srt_data and self.srt_bar_check.isChecked():
             td = self.srt_data.get_data_at_time(t_ms)
             if td: srt_text = td.status_line(self.srt_fields_combo.checked_keys())
-        # Scale pixel offsets from video resolution to display resolution
+        # Scale pixel offsets from canvas (incl. bars) to display resolution
         ctrl = self._player_panel.controller
-        ratio = h / ctrl.video_h if ctrl.video_h > 0 else 1.0
+        cw, ch, _sx, _sy = self._current_canvas_dims()
+        canvas_h = ch if ch > 0 else (ctrl.video_h or h)
+        ratio = h / canvas_h if canvas_h > 0 else 1.0
+        # Source dims at display resolution — let the renderer center on the
+        # source area inside the (display-sized) padded canvas.
+        if cw > 0 and ch > 0 and ctrl.video_w > 0:
+            display_src_w = int(round(ctrl.video_w * (w / cw)))
+            display_src_h = int(round(ctrl.video_h * (h / ch)))
+        else:
+            display_src_w = display_src_h = 0
         cfg = OsdRenderConfig(
             offset_x     = int(self.sl_x.value() * ratio),
             offset_y     = int(self.sl_y.value() * ratio),
@@ -1944,6 +2309,9 @@ class MainWindow(QMainWindow):
             srt_text     = srt_text,
             srt_opacity  = self.srt_opacity_sl.value() / 100.0,
             srt_scale    = self.srt_size_sl.value() / 100.0,
+            hide_regions = self._active_hide_regions(),
+            source_w     = display_src_w,
+            source_h     = display_src_h,
         )
         canvas = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
         gc = self.osd_data.grid_cols if self.osd_data else GRID_COLS
@@ -1966,6 +2334,7 @@ class MainWindow(QMainWindow):
 
     def _queue_preview(self):
         """Debounced preview refresh — fires 60ms after sliders stop moving."""
+        self._sync_region_overlay()
         self._player_panel.controller.queue_refresh()
 
     # ── Color Correction ─────────────────────────────────────────────────────
@@ -2329,7 +2698,7 @@ class MainWindow(QMainWindow):
             ts = ""
 
         if hasattr(self, 'transparent_check') and self.transparent_check.isChecked():
-            out_name = f"{stem}_overlay{ts}.webm"
+            out_name = f"{stem}_chromakey{ts}.mp4"
         else:
             out_name = f"{stem}_osd{ts}.mp4"
         return str(p.parent / out_name)
@@ -2502,7 +2871,7 @@ class MainWindow(QMainWindow):
             def _sa():
                 new_name = name_edit.text().strip()
                 if not new_name: return
-                _req_ext = ".webm" if self.transparent_check.isChecked() else ".mp4"
+                _req_ext = ".mp4"
                 if not new_name.lower().endswith(_req_ext):
                     new_name += _req_ext
                 new_path = os.path.join(os.path.dirname(out_path), new_name)
@@ -2533,11 +2902,7 @@ class MainWindow(QMainWindow):
         _upscale_map = {0: "", 1: "1440p", 2: "2.7k", 3: "4k"}
         upscale_target = _upscale_map.get(self.upscale_combo.currentIndex(), "")
 
-        # Force .webm extension for transparent export (VP9 alpha needs WebM container)
         _out_path = self.out_row.path
-        if self.transparent_check.isChecked() and not _out_path.lower().endswith(".webm"):
-            _out_path = str(Path(_out_path).with_suffix(".webm"))
-            self.out_row.set_path(_out_path)
 
         cfg = ProcessingConfig(
             input_video   = self.video_row.path,
@@ -2562,8 +2927,10 @@ class MainWindow(QMainWindow):
             upscale_target = upscale_target,
             osd_offset_ms = self.osd_offset_sb.value(),
             srt_enabled_fields = self.srt_fields_combo.checked_keys(),
+            hide_regions = self._active_hide_regions(),
             color_config = self._get_color_config() if self.cc_enable.isChecked() and not self.transparent_check.isChecked() else None,
             transparent_export = self.transparent_check.isChecked(),
+            target_aspect = self._current_target_aspect(),
         )
 
         self.render_btn.setEnabled(False)
