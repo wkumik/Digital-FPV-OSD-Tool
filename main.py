@@ -704,77 +704,92 @@ class MainWindow(QMainWindow):
         ll.setContentsMargins(14, 16, 10, 16)
         ll.setSpacing(10)
 
-        # Header: title + theme toggle button on the same row
+        # ── Header: app icon + branding stack + utility buttons ───────────────
         hdr_row = QHBoxLayout()
         hdr_row.setContentsMargins(0, 0, 0, 0)
-        hdr_row.setSpacing(8)
+        hdr_row.setSpacing(10)
+
+        # App icon (left)
+        _icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "assets", "icon.png")
+        app_icon_lbl = QLabel()
+        if os.path.exists(_icon_path):
+            pix = QPixmap(_icon_path).scaled(
+                36, 36, Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+            app_icon_lbl.setPixmap(pix)
+        app_icon_lbl.setFixedSize(36, 36)
+        self._app_icon_lbl = app_icon_lbl
+
+        # Title + version badge inline
+        title_box = QHBoxLayout()
+        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setSpacing(6)
 
         h1 = QLabel("VueOSD")
-        h1.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        h1.setFont(QFont("Segoe UI", 18, QFont.Weight.Bold))
         h1.setStyleSheet(f"color:{_T()['text']};")
         self._h1 = h1
 
-        h2 = QLabel("Digital FPV OSD Tool")
-        h2.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
-        h2.setStyleSheet(f"color:{_T()['text']};")
-        h2.setAlignment(Qt.AlignmentFlag.AlignBottom)
-        self._h2 = h2
-
         ver = QLabel(f"v{VERSION}")
-        ver.setFont(QFont("Segoe UI", _fs(8)))
+        ver.setFont(QFont("Segoe UI", _fs(10)))
         ver.setStyleSheet(f"color:{_T()['muted']};")
-        ver.setAlignment(Qt.AlignmentFlag.AlignBottom)
-        self._ver_lbl = ver
+        self._h2 = ver
+        self._ver_lbl = ver  # legacy alias for theme reapply code
 
-        self._theme_btn = QPushButton()
-        self._theme_btn.setFixedSize(30, 30)
-        self._theme_btn.setToolTip("Toggle light / dark theme")
-        self._theme_btn.setStyleSheet(
-            f"QPushButton{{background:transparent;border:none;border-radius:15px;}}"
+        title_box.addWidget(h1, 0, Qt.AlignmentFlag.AlignVCenter)
+        title_box.addWidget(ver, 0, Qt.AlignmentFlag.AlignVCenter)
+        title_box.addStretch()
+
+        # Utility buttons (right)
+        _btn_css = (
+            f"QPushButton{{background:transparent;border:none;border-radius:14px;"
+            f"padding:0;}}"
             f"QPushButton:hover{{background:{_T()['surface']};}}"
         )
-        self._theme_btn.setIcon(_icon("moon-dark.png", 18))
+
+        self._theme_btn = QPushButton()
+        self._theme_btn.setFixedSize(28, 28)
+        self._theme_btn.setToolTip("Toggle light / dark theme")
+        self._theme_btn.setStyleSheet(_btn_css)
+        self._theme_btn.setIcon(_icon("moon-dark.png", 16))
         self._theme_btn.clicked.connect(self._toggle_theme)
 
         self._palette_btn = QPushButton()
-        self._palette_btn.setFixedSize(30, 30)
+        self._palette_btn.setFixedSize(28, 28)
         self._palette_btn.setToolTip("Open theme colour editor")
-        self._palette_btn.setStyleSheet(
-            f"QPushButton{{background:transparent;border:none;border-radius:15px;}}"
-            f"QPushButton:hover{{background:{_T()['surface']};}}"
-        )
+        self._palette_btn.setStyleSheet(_btn_css)
         self._palette_btn.setText("🎨")
-        self._palette_btn.setFont(QFont("Segoe UI", 14))
+        self._palette_btn.setFont(QFont("Segoe UI", 13))
         self._palette_btn.clicked.connect(self._open_theme_editor)
         self._theme_editor_dlg = None   # lazily created
 
-        hdr_row.addWidget(h1)
-        hdr_row.addWidget(h2)
-        hdr_row.addWidget(ver)
-        hdr_row.addStretch()
-        hdr_row.addWidget(self._palette_btn)
-        hdr_row.addWidget(self._theme_btn)
-        ll.addLayout(hdr_row)
-
-        # ── UI Scale selector ─────────────────────────────────────────────────
-        scale_row = QHBoxLayout()
-        scale_row.setContentsMargins(0, 2, 0, 0)
-        scale_row.setSpacing(6)
-        scale_lbl = QLabel("UI Scale")
-        scale_lbl.setStyleSheet(f"color:{_T()['muted']};font-size:{_fs(10)}px;")
-        self._scale_lbl = scale_lbl
+        # Compact UI scale combo on the same row
         self._scale_cb = QComboBox()
         self._scale_cb.addItems(["100%", "125%", "150%", "175%"])
         _scale_vals = [1.0, 1.25, 1.5, 1.75]
         _scale_idx = min(range(len(_scale_vals)), key=lambda i: abs(_scale_vals[i] - _UI_SCALE))
         self._scale_cb.setCurrentIndex(_scale_idx)
-        self._scale_cb.setFixedWidth(72)
-        self._scale_cb.setStyleSheet(COMBO_STYLE)
+        self._scale_cb.setFixedSize(64, 28)
+        self._scale_cb.setStyleSheet(
+            f"QComboBox{{background:transparent;color:{_T()['muted']};"
+            f"border:1px solid {_T()['border2']};border-radius:6px;"
+            f"padding:2px 6px;font-size:{_fs(10)}px;}}"
+            f"QComboBox:hover{{color:{_T()['text']};border-color:{_T()['border']};}}"
+            f"QComboBox::drop-down{{border:none;width:14px;}}"
+        )
+        self._scale_cb.setToolTip("UI scale")
         self._scale_cb.currentIndexChanged.connect(self._on_scale_changed)
-        scale_row.addWidget(scale_lbl)
-        scale_row.addWidget(self._scale_cb)
-        scale_row.addStretch()
-        ll.addLayout(scale_row)
+        # legacy alias for theme reapply code
+        self._scale_lbl = QLabel("")
+        self._scale_lbl.hide()
+
+        hdr_row.addWidget(app_icon_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        hdr_row.addLayout(title_box, 1)
+        hdr_row.addWidget(self._scale_cb, 0, Qt.AlignmentFlag.AlignVCenter)
+        hdr_row.addWidget(self._palette_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        hdr_row.addWidget(self._theme_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        ll.addLayout(hdr_row)
 
         # ── Files group ───────────────────────────────────────────────────────
         fg = QGroupBox("Files")
