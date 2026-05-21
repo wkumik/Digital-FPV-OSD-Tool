@@ -35,6 +35,7 @@ except ImportError:
 
 from osd_parser  import OsdFrame, GRID_COLS, GRID_ROWS  # defaults; frames carry their own dims
 from font_loader import OsdFont
+from widgets     import Widget, render_widgets_pil, blend_widgets_numpy
 
 
 @dataclass
@@ -57,6 +58,8 @@ class OsdRenderConfig:
     # than the padded canvas. 0 = canvas is the source (no padding).
     source_w:      int   = 0
     source_h:      int   = 0
+    # Custom telemetry widgets composited on top of the OSD glyph grid + SRT bar.
+    widgets:       List[Widget] = field(default_factory=list)
 
 
 def cell_in_regions(row: int, col: int, regions: List[HideRegion]) -> bool:
@@ -107,6 +110,7 @@ def render_osd_frame(
     cfg: OsdRenderConfig,
     grid_cols: int = GRID_COLS,
     grid_rows: int = GRID_ROWS,
+    telemetry=None,
 ) -> "Image.Image":
     if not PIL_OK:
         return frame_img
@@ -140,6 +144,10 @@ def render_osd_frame(
         _draw_srt_bar(out, cfg.srt_text, opacity=cfg.srt_opacity,
                       scale=cfg.srt_scale)
 
+    if cfg.widgets and telemetry is not None:
+        render_widgets_pil(out, cfg.widgets, telemetry,
+                           source_w=cfg.source_w, source_h=cfg.source_h)
+
     return out
 
 
@@ -149,6 +157,7 @@ def render_fallback(
     cfg: OsdRenderConfig,
     grid_cols: int = GRID_COLS,
     grid_rows: int = GRID_ROWS,
+    telemetry=None,
 ) -> "Image.Image":
     if not PIL_OK:
         return frame_img
@@ -171,6 +180,9 @@ def render_fallback(
     if cfg.show_srt_bar and cfg.srt_text:
         _draw_srt_bar(out, cfg.srt_text, opacity=cfg.srt_opacity,
                       scale=cfg.srt_scale)
+    if cfg.widgets and telemetry is not None:
+        render_widgets_pil(out, cfg.widgets, telemetry,
+                           source_w=cfg.source_w, source_h=cfg.source_h)
     return out
 
 
@@ -334,11 +346,13 @@ class OsdRenderer:
 
     def composite(self,
                   osd_frame: Optional[OsdFrame],
-                  srt_text: str = "") -> np.ndarray:
+                  srt_text: str = "",
+                  telemetry=None) -> np.ndarray:
         """
-        Composite OSD + SRT onto the pre-allocated frame buffer (always starts blank).
-        Returns the buffer — written directly to FFmpeg stdin via buffer protocol.
-        Reusing the buffer saves ~8.3 MB allocation per frame at 1080p.
+        Composite OSD + SRT + widgets onto the pre-allocated frame buffer
+        (always starts blank). Returns the buffer — written directly to FFmpeg
+        stdin via buffer protocol. Reusing the buffer saves ~8.3 MB allocation
+        per frame at 1080p.
         """
         # Reset to transparent black in-place — ~0.2ms for 1080p (vs 0.6ms alloc+copy)
         self._frame_buf[:] = 0
@@ -396,5 +410,12 @@ class OsdRenderer:
                           ) / safe_a
                 dst[:, :, :3] = out_rgb.astype(np.uint8)
                 dst[:, :, 3]  = (out_a[:, :, 0] * 255).astype(np.uint8)
+
+        # Custom widgets — composited last so they sit on top of everything.
+        # Cost scales with widget area only, not full-frame.
+        if self.cfg.widgets and telemetry is not None:
+            blend_widgets_numpy(frame, self.cfg.widgets, telemetry,
+                                source_w=self.cfg.source_w,
+                                source_h=self.cfg.source_h)
 
         return frame  # write directly: pipe.write(frame)  ← buffer protocol, no copy

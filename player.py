@@ -78,6 +78,11 @@ class VideoCanvas(QWidget):
     resized = pyqtSignal()  # emitted after resize so controller can re-render OSD
     regionAdded = pyqtSignal(tuple)     # (r0, c0, r1, c1) in OSD grid coords
     regionRemoveRequested = pyqtSignal(int)  # index into current regions list
+    # Widget editing — emit live (continuous) and committed signals so the host
+    # can throttle preview refreshes while still updating UI cheaply mid-drag.
+    widgetSelected = pyqtSignal(int)             # index in current widget list (-1 = none)
+    widgetMoved    = pyqtSignal(int, float, float, float, float)  # (idx, x, y, w, h)
+    widgetCommit   = pyqtSignal(int, float, float, float, float)  # same, but drag-end
 
     def __init__(self, theme_fn, fs_fn, parent=None):
         super().__init__(parent)
@@ -111,6 +116,19 @@ class VideoCanvas(QWidget):
         # The unmodified source frame is kept separately so we can re-pad
         # when the aspect ratio changes without re-decoding.
         self._source_pil = None
+        # ── Widget edit state ─────────────────────────────────────────────
+        # _widget_edit = False -> widgets render via overlay only (no chrome).
+        # _widget_edit = True  -> selection chrome drawn, mouse drags widgets.
+        # _widget_list mirrors MainWindow's self._widgets (rects in normalised
+        # source coords). _widget_src_rect_fn returns the SOURCE area in canvas
+        # pixels so we can convert between normalised (0..1) and pixel space.
+        self._widget_edit: bool = False
+        self._widget_list: list = []          # list[widgets.Widget]
+        self._widget_selected: int = -1
+        self._widget_hover: int = -1
+        self._widget_src_rect_fn = None       # () -> (sx, sy, sw, sh) or None
+        self._widget_drag_offset: tuple[int, int] | None = None  # (dx, dy) px within widget
+        self._widget_drag_idx: int = -1
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -253,6 +271,40 @@ class VideoCanvas(QWidget):
         self._region_regions = list(regions or [])
         self.update()
 
+    # ── Widget edit API ───────────────────────────────────────────────────────
+
+    def set_widget_edit(self, enabled: bool):
+        """Toggle widget edit mode. When on, widgets get selection chrome and
+        the canvas captures drag events to reposition them."""
+        self._widget_edit = bool(enabled)
+        self._widget_drag_offset = None
+        self._widget_drag_idx = -1
+        if enabled:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_widgets(self, widgets: list):
+        """Update the widget list mirror (used for selection chrome + hit-test)."""
+        self._widget_list = list(widgets or [])
+        # Drop stale selection if list shrank
+        if self._widget_selected >= len(self._widget_list):
+            self._widget_selected = -1
+        self.update()
+
+    def set_widget_selected(self, idx: int):
+        """Set which widget index is highlighted (called by the side panel list)."""
+        if idx == self._widget_selected:
+            return
+        self._widget_selected = int(idx) if 0 <= idx < len(self._widget_list) else -1
+        self.update()
+
+    def set_widget_src_rect_fn(self, fn):
+        """Install a callback returning the SOURCE video rect in canvas px:
+        ``() -> (sx, sy, sw, sh) | None``.  ``None`` means no frame loaded yet."""
+        self._widget_src_rect_fn = fn
+
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _rebuild_base(self):
@@ -292,6 +344,9 @@ class VideoCanvas(QWidget):
                 p.drawPixmap(px, py, self._osd_pixmap)
             # Hide-region overlay on top of the OSD
             self._paint_regions(p, t)
+            # Widget selection chrome on top of everything
+            if self._widget_edit:
+                self._paint_widget_chrome(p)
 
         # Border
         p.setPen(QPen(QColor(t["border"]), 1))
@@ -486,6 +541,90 @@ class VideoCanvas(QWidget):
                 return i
         return -1
 
+    # ── Widget edit internals ─────────────────────────────────────────────────
+
+    def _widget_src_rect_px(self):
+        """Source video rect in canvas px, or None if unknown."""
+        fn = self._widget_src_rect_fn
+        if fn is None:
+            return None
+        try:
+            r = fn()
+        except Exception:
+            return None
+        if not r or len(r) != 4:
+            return None
+        sx, sy, sw, sh = r
+        if sw <= 0 or sh <= 0:
+            return None
+        return int(sx), int(sy), int(sw), int(sh)
+
+    def _widget_rect_px(self, w):
+        """Resolve a widget's pixel rect on the canvas, or None."""
+        src = self._widget_src_rect_px()
+        if src is None:
+            return None
+        sx, sy, sw, sh = src
+        ww = max(1, int(round(w.w * sw)))
+        wh = max(1, int(round(w.h * sh)))
+        cx = sx + int(round(w.x * sw))
+        cy = sy + int(round(w.y * sh))
+        return cx - ww // 2, cy - wh // 2, ww, wh
+
+    def _widget_hit_test(self, x: int, y: int) -> int:
+        """Return index of widget under (x, y) — selected first, then topmost."""
+        # Selected widget wins (keeps drag responsive when widgets overlap)
+        sel = self._widget_selected
+        if 0 <= sel < len(self._widget_list):
+            r = self._widget_rect_px(self._widget_list[sel])
+            if r is not None:
+                rx, ry, rw, rh = r
+                if rx <= x < rx + rw and ry <= y < ry + rh:
+                    return sel
+        for i in range(len(self._widget_list) - 1, -1, -1):
+            r = self._widget_rect_px(self._widget_list[i])
+            if r is None:
+                continue
+            rx, ry, rw, rh = r
+            if rx <= x < rx + rw and ry <= y < ry + rh:
+                return i
+        return -1
+
+    def _paint_widget_chrome(self, p: QPainter):
+        """Selection border + hover outline for widgets in edit mode."""
+        if not self._widget_list:
+            return
+        for i, w in enumerate(self._widget_list):
+            r = self._widget_rect_px(w)
+            if r is None:
+                continue
+            rx, ry, rw, rh = r
+            qr = QRect(rx, ry, rw, rh)
+            if i == self._widget_selected:
+                # Solid accent border + corner ticks
+                pen = QPen(QColor(60, 200, 255, 230), 2, Qt.PenStyle.SolidLine)
+                p.setPen(pen)
+                p.setBrush(QColor(60, 200, 255, 30))
+                p.drawRect(qr)
+                # Corner ticks (small filled squares) for visual affordance
+                tick = 5
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(60, 200, 255, 230))
+                for cx, cy in ((rx, ry), (rx + rw - tick, ry),
+                               (rx, ry + rh - tick),
+                               (rx + rw - tick, ry + rh - tick)):
+                    p.drawRect(cx, cy, tick, tick)
+            elif i == self._widget_hover:
+                pen = QPen(QColor(200, 200, 200, 180), 1, Qt.PenStyle.DashLine)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(qr)
+            else:
+                pen = QPen(QColor(180, 180, 180, 120), 1, Qt.PenStyle.DotLine)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(qr)
+
     def resizeEvent(self, e):
         super().resizeEvent(e)
         if self._base_pil is not None:
@@ -496,6 +635,20 @@ class VideoCanvas(QWidget):
 
     def mousePressEvent(self, event):
         pos = event.position().toPoint()
+        if self._widget_edit and event.button() == Qt.MouseButton.LeftButton:
+            idx = self._widget_hit_test(pos.x(), pos.y())
+            if idx != self._widget_selected:
+                self._widget_selected = idx
+                self.widgetSelected.emit(idx)
+            if idx >= 0:
+                r = self._widget_rect_px(self._widget_list[idx])
+                if r is not None:
+                    rx, ry, _rw, _rh = r
+                    self._widget_drag_offset = (pos.x() - rx, pos.y() - ry)
+                    self._widget_drag_idx = idx
+                    self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self.update()
+            return
         if self._region_mode == "add" and event.button() == Qt.MouseButton.LeftButton:
             self._region_drag_start = (pos.x(), pos.y())
             self._region_drag_cur   = (pos.x(), pos.y())
@@ -513,6 +666,39 @@ class VideoCanvas(QWidget):
 
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
+        if self._widget_edit:
+            # Active drag — move the widget, normalise back to source coords,
+            # emit a continuous move signal so the host can refresh the preview.
+            if self._widget_drag_idx >= 0 and self._widget_drag_offset is not None:
+                src = self._widget_src_rect_px()
+                if src is not None and self._widget_drag_idx < len(self._widget_list):
+                    sx, sy, sw, sh = src
+                    w = self._widget_list[self._widget_drag_idx]
+                    dx, dy = self._widget_drag_offset
+                    # New top-left under cursor, then convert top-left -> centre
+                    rx = pos.x() - dx
+                    ry = pos.y() - dy
+                    ww = max(1, int(round(w.w * sw)))
+                    wh = max(1, int(round(w.h * sh)))
+                    cx = rx + ww / 2
+                    cy = ry + wh / 2
+                    # Normalise to source coords, clamp so widgets can't escape entirely
+                    nx = max(0.0, min(1.0, (cx - sx) / sw))
+                    ny = max(0.0, min(1.0, (cy - sy) / sh))
+                    # Update local copy so chrome redraws at the new spot immediately
+                    w.x = nx
+                    w.y = ny
+                    self.widgetMoved.emit(self._widget_drag_idx, nx, ny, w.w, w.h)
+                    self.update()
+                return
+            # Hover — light dashed outline on whichever widget is under the cursor
+            new_idx = self._widget_hit_test(pos.x(), pos.y())
+            if new_idx != self._widget_hover:
+                self._widget_hover = new_idx
+                self.update()
+            self.setCursor(Qt.CursorShape.OpenHandCursor if new_idx >= 0
+                           else Qt.CursorShape.ArrowCursor)
+            return
         if self._region_mode == "add" and self._region_drag_start is not None:
             self._region_drag_cur = (pos.x(), pos.y())
             self.update()
@@ -533,6 +719,18 @@ class VideoCanvas(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._widget_edit and self._widget_drag_idx >= 0 \
+                and event.button() == Qt.MouseButton.LeftButton:
+            idx = self._widget_drag_idx
+            self._widget_drag_idx = -1
+            self._widget_drag_offset = None
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            if 0 <= idx < len(self._widget_list):
+                w = self._widget_list[idx]
+                # widgetCommit lets the host persist + do a full-quality refresh
+                self.widgetCommit.emit(idx, w.x, w.y, w.w, w.h)
+            self.update()
+            return
         if self._region_mode == "add" and self._region_drag_start is not None \
                 and event.button() == Qt.MouseButton.LeftButton:
             x0, y0 = self._region_drag_start
