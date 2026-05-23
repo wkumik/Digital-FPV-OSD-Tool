@@ -111,7 +111,15 @@ _BTFL_SYMBOLS: dict[str, tuple[int, str, int, float, int]] = dict(_INAV_SYMBOLS)
 # ArduPilot ships its own osd font and symbol set; many of the same anchor
 # IDs are used as INAV. Worth verifying against real footage.
 
-_ARDU_SYMBOLS: dict[str, tuple[int, str, int, float, int]] = dict(_INAV_SYMBOLS)
+_ARDU_SYMBOLS: dict[str, tuple[int, str, int, float, int]] = {
+    **_INAV_SYMBOLS,
+    "osd_speed_kmh":   (0xA1, "left", 4, 1.0, 0),
+    "osd_altitude_m":  (0xB1, "left", 5, 1.0, 0),
+    "osd_rssi":        (0x01, "right", 3, 1.0, 0),
+    "osd_mah_drawn":   (0x07, "left", 6, 1.0, 0),
+    "osd_current_a":   (0x9A, "left", 5, 1.0, 0),
+    "osd_field_1f":    (0x06, "left", 5, 1.0, 0),
+}
 
 
 FW_TABLES: dict[str, dict[str, tuple[int, str, int, float, int]]] = {
@@ -131,6 +139,7 @@ OSD_FIELD_REGISTRY: list[tuple[str, str, str, str]] = [
     ("osd_rssi",         "RSSI (OSD)",         "",     "{:.0f}"),
     ("osd_sats",         "GPS sats (OSD)",     "",     "{:.0f}"),
     ("osd_mah_drawn",    "mAh drawn (OSD)",    "mAh",  "{:.0f}"),
+    ("osd_current_a",    "Current (OSD)",      "A",    "{:.1f}"),
     ("osd_throttle_pct", "Throttle % (OSD)",   "%",    "{:.0f}"),
     ("osd_field_1f",     "Voltage (OSD)",      "V",    "{:.2f}"),
 ]
@@ -159,6 +168,10 @@ def _glyph_to_char(code: int,
         return "."
     if code == _MINUS:
         return "-"
+    if 0xC0 <= code <= 0xC9:
+        return str(code - 0xC0)
+    if 0xD0 <= code <= 0xD9:
+        return f".{code - 0xD0}"
     if extra is not None:
         return extra.get(code)
     return None

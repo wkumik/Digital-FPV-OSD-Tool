@@ -1006,14 +1006,14 @@ def _overlay_pipeline(
 
                 tframe = TelemetryFrame(td, raw_osd_frame, firmware=config.firmware,
                                         osd_font=font, srt_file=srt_data,
-                                        osd_file=osd_data) \
+                                        osd_file=osd_data, osd_time_ms=abs_t_ms) \
                     if has_widgets else None
 
                 # Cache key includes both SRT identity and OSD frame index so
                 # widgets can't reuse stale renders across changing telemetry.
                 if has_widgets:
                     osd_key = raw_osd_frame.index if raw_osd_frame else -1
-                    widget_key = (id(td) if td is not None else 0, osd_key)
+                    widget_key = (id(td) if td is not None else 0, osd_key, abs_t_ms)
                 else:
                     widget_key = 0
                 cache_key  = (osd_frame.index if osd_frame else -1, srt_text, widget_key)
@@ -1226,12 +1226,12 @@ def _chroma_key_pipeline(
 
                 tframe = TelemetryFrame(td, raw_osd_frame, firmware=config.firmware,
                                         osd_font=font, srt_file=srt_data,
-                                        osd_file=osd_data) \
+                                        osd_file=osd_data, osd_time_ms=abs_t_ms) \
                     if has_widgets else None
 
                 if has_widgets:
                     osd_key = raw_osd_frame.index if raw_osd_frame else -1
-                    widget_key = (id(td) if td is not None else 0, osd_key)
+                    widget_key = (id(td) if td is not None else 0, osd_key, abs_t_ms)
                 else:
                     widget_key = 0
                 cache_key  = (osd_frame.index if osd_frame else -1, srt_text, widget_key)

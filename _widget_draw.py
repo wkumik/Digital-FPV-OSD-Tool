@@ -162,7 +162,7 @@ def _draw_bar(img: Any, w: Any,
 
     if draw_value:
         fmt = str(style.get("fmt", default_fmt))
-        val_str = _format_value(v, fmt, default_fmt)
+        val_str = _format_value(value, fmt, default_fmt)
         if bool(style.get("show_unit", True)) and unit:
             val_str = f"{val_str} {unit}"
         cap_y0, cap_y1 = text_anchor
@@ -248,7 +248,7 @@ def _draw_gauge(img: Any, w: Any,
 
     if show_value:
         fmt = str(style.get("fmt", default_fmt))
-        val_str = _format_value(v, fmt, default_fmt)
+        val_str = _format_value(value, fmt, default_fmt)
         font = _font(int(size_s * float(style.get("font_scale", 0.32))))
         bb = pdraw.textbbox((0, 0), val_str, font=font)
         tw = bb[2] - bb[0]
@@ -325,7 +325,7 @@ def _draw_semicircle(img: Any, w: Any,
 
     if show_value:
         fmt = str(style.get("fmt", default_fmt))
-        val_str = _format_value(v, fmt, default_fmt)
+        val_str = _format_value(value, fmt, default_fmt)
         has_unit = bool(style.get("show_unit", True)) and unit
         val_center_y = cy - r * (0.50 if has_unit else 0.40)
         font = _font(int(r * float(style.get("font_scale", 0.50))))
@@ -443,7 +443,7 @@ def _draw_tickdial(img: Any, w: Any,
 
     if show_value:
         fmt = str(style.get("fmt", default_fmt))
-        val_str = _format_value(v, fmt, default_fmt)
+        val_str = _format_value(value, fmt, default_fmt)
         has_unit = bool(style.get("show_unit", True)) and unit
         vfont = _font(int(r * float(style.get("font_scale", 0.28))))
         vbb = pdraw.textbbox((0, 0), val_str, font=vfont)
@@ -523,7 +523,7 @@ def _draw_ring(img: Any, w: Any,
 
     if show_value:
         fmt = str(style.get("fmt", default_fmt))
-        val_str = _format_value(v, fmt, default_fmt)
+        val_str = _format_value(value, fmt, default_fmt)
         has_unit = bool(style.get("show_unit", True)) and unit
         font = _font(int(size * float(style.get("font_scale", 0.28))))
         tbb = pdraw.textbbox((0, 0), val_str, font=font)
@@ -669,7 +669,7 @@ def _draw_analog(img: Any, w: Any,
 
     if show_value:
         fmt = str(style.get("fmt", default_fmt))
-        val_str = _format_value(v, fmt, default_fmt)
+        val_str = _format_value(value, fmt, default_fmt)
         vfont = _font(int(r * float(style.get("font_scale", 0.20))))
         vbb = pdraw.textbbox((0, 0), val_str, font=vfont)
         vw_ = vbb[2] - vbb[0]

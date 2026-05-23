@@ -15,6 +15,7 @@ Two render entry points mirror osd_renderer.py:
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
@@ -36,6 +37,10 @@ from _widget_draw import (
     _draw_tickdial, _draw_ring, _draw_analog,
 )
 from _widget_map import _draw_map, invalidate_track_caches  # noqa: F401 (re-exported)
+
+
+OSD_WIDGET_MAX_GAP_MS = 1500
+OSD_WIDGET_DOWNSAMPLE_HZ_AT_300 = 5.0
 
 
 # ----- Widget model ----------------------------------------------------------
@@ -146,16 +151,20 @@ class TelemetryFrame:
     ``srt_file`` / ``osd_file`` expose the full telemetry tracks so widgets
     that need whole-track context (e.g. the map) can reach them.
     """
-    __slots__ = ("_srt", "_osd", "_fw", "_osd_cache", "_slim_map",
+    __slots__ = ("_srt", "_osd", "_fw", "_osd_cache", "_visual_cache", "_slim_map",
+                 "osd_time_ms",
                  "srt_file", "osd_file")
 
     def __init__(self, srt_td=None, osd_frame=None, firmware: str = "INAV",
-                 osd_font=None, srt_file=None, osd_file=None):
+                 osd_font=None, srt_file=None, osd_file=None,
+                 osd_time_ms: int | None = None):
         self._srt = srt_td
         self._osd = osd_frame
         self._fw  = firmware
         self._osd_cache: dict[str, Optional[float]] = {}
+        self._visual_cache: dict[tuple[str, float], Optional[float]] = {}
         self._slim_map = _build_slim_digit_map(osd_font) if osd_font is not None else {}
+        self.osd_time_ms = osd_time_ms
         self.srt_file = srt_file
         self.osd_file = osd_file
 
@@ -177,6 +186,87 @@ class TelemetryFrame:
         self._osd_cache[key] = v
         return v
 
+    def get_osd_visual_value(self, key: str, smoothness: float) -> Optional[float]:
+        """Return the visual-only OSD value for moving widgets.
+
+        The regular widget text still uses get_osd_value(). Above 100% this
+        evaluates a slower virtual OSD stream, then interpolates inside that
+        stream so fast-refresh, quantized OSD values behave more like the
+        user's successful 2 Hz test file without changing displayed numbers.
+        """
+        if self.osd_file is None or self.osd_time_ms is None:
+            return self.get_osd_value(key)
+        smoothness = max(0.0, float(smoothness))
+        cache_key = (key, round(smoothness, 3))
+        if cache_key in self._visual_cache:
+            return self._visual_cache[cache_key]
+        if smoothness <= 1.0:
+            value = self._interpolated_osd_value(key, self.osd_time_ms,
+                                                 smoothness=smoothness)
+        else:
+            value = self._downsampled_visual_value(key, smoothness)
+        self._visual_cache[cache_key] = value
+        return value
+
+    def _interpolated_osd_value(self, key: str, time_ms: int,
+                                smoothness: float = 1.0) -> Optional[float]:
+        frames = getattr(self.osd_file, "frames", None)
+        timestamps = getattr(self.osd_file, "timestamps", None)
+        if not frames or not timestamps:
+            return None
+        idx = bisect.bisect_right(timestamps, time_ms) - 1
+        idx = max(0, min(idx, len(frames) - 1))
+        if idx + 1 >= len(frames):
+            return _osd_extract(frames[idx], key, self._fw, slim_map=self._slim_map)
+
+        prev = frames[idx]
+        nxt = frames[idx + 1]
+        gap = nxt.time_ms - prev.time_ms
+        if gap <= 0 or gap > OSD_WIDGET_MAX_GAP_MS:
+            return _osd_extract(prev, key, self._fw, slim_map=self._slim_map)
+        prev_v = _osd_extract(prev, key, self._fw, slim_map=self._slim_map)
+        next_v = _osd_extract(nxt, key, self._fw, slim_map=self._slim_map)
+        if prev_v is None or next_v is None:
+            return None
+        alpha = max(0.0, min(1.0, (time_ms - prev.time_ms) / gap))
+        shaped = alpha * alpha * (3.0 - 2.0 * alpha)
+        blend = min(1.0, max(0.0, smoothness))
+        alpha = alpha + (shaped - alpha) * blend
+        return prev_v + (next_v - prev_v) * alpha
+
+    def _downsampled_visual_value(self, key: str, smoothness: float) -> Optional[float]:
+        t = int(self.osd_time_ms)
+        over = min(1.0, max(0.0, smoothness - 1.0) / 2.0)
+        max_interval = int(round(1000.0 / OSD_WIDGET_DOWNSAMPLE_HZ_AT_300))
+        interval_ms = max(1, int(round(1 + (max_interval - 1) * over)))
+        bucket0 = (t // interval_ms) * interval_ms
+        bucket1 = bucket0 + interval_ms
+        v0 = self._interpolated_osd_value(key, bucket0, smoothness=1.0)
+        v1 = self._interpolated_osd_value(key, bucket1, smoothness=1.0)
+        if v0 is None or v1 is None:
+            return None
+        alpha = (t - bucket0) / max(1, bucket1 - bucket0)
+        alpha = alpha * alpha * (3.0 - 2.0 * alpha)
+        return v0 + (v1 - v0) * alpha
+
+
+class _VisualWidgetValue:
+    """Float-like wrapper: geometry sees visual_value, text formats text_value."""
+    __slots__ = ("visual_value", "text_value")
+
+    def __init__(self, visual_value: float, text_value: float):
+        self.visual_value = visual_value
+        self.text_value = text_value
+
+    def __float__(self) -> float:
+        return float(self.visual_value)
+
+    def __format__(self, spec: str) -> str:
+        return format(self.text_value, spec)
+
+    def __str__(self) -> str:
+        return str(self.text_value)
+
 
 # ----- Value resolution ------------------------------------------------------
 
@@ -192,6 +282,22 @@ def _get_value(telemetry: Any, source: str) -> tuple[Optional[float], str, str]:
     if get_osd is None:
         return None, unit, fmt
     return get_osd(source), unit, fmt
+
+
+def _get_widget_value(telemetry: Any, widget: Widget) -> tuple[Optional[Any], str, str]:
+    value, unit, fmt = _get_value(telemetry, widget.source)
+    if value is None or widget.type == "digital":
+        return value, unit, fmt
+    info = _SOURCE_LOOKUP.get(widget.source)
+    is_osd_source = info is not None and info[0] is None and widget.source != "gps_track"
+    get_visual = getattr(telemetry, "get_osd_visual_value", None)
+    if not is_osd_source or get_visual is None:
+        return value, unit, fmt
+    smoothness = max(0.0, float(widget.style.get("smoothness", 0.7)))
+    visual = get_visual(widget.source, smoothness)
+    if visual is None:
+        return value, unit, fmt
+    return _VisualWidgetValue(float(visual), float(value)), unit, fmt
 
 
 # ----- Dispatch --------------------------------------------------------------
@@ -253,7 +359,7 @@ def render_widgets_pil(img: "Image.Image",
         if w.type in _TELEMETRY_AWARE:
             _draw_map(img, w, telemetry, rx, ry, ww, wh)
             continue
-        value, unit, default_fmt = _get_value(telemetry, w.source)
+        value, unit, default_fmt = _get_widget_value(telemetry, w)
         if value is None:
             continue
         draw_fn = _DRAW_FUNCS.get(w.type)
@@ -291,7 +397,7 @@ def blend_widgets_numpy(frame: np.ndarray,
             patch = Image.new("RGBA", (ww, wh), (0, 0, 0, 0))
             _draw_map(patch, w, telemetry, 0, 0, ww, wh)
         else:
-            value, unit, default_fmt = _get_value(telemetry, w.source)
+            value, unit, default_fmt = _get_widget_value(telemetry, w)
             if value is None:
                 continue
             draw_fn = _DRAW_FUNCS.get(w.type)
