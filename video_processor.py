@@ -1004,7 +1004,9 @@ def _overlay_pipeline(
                 if td and config.show_srt_bar:
                     srt_text = td.status_line(config.srt_enabled_fields)
 
-                tframe = TelemetryFrame(td, raw_osd_frame, firmware=config.firmware) \
+                tframe = TelemetryFrame(td, raw_osd_frame, firmware=config.firmware,
+                                        osd_font=font, srt_file=srt_data,
+                                        osd_file=osd_data) \
                     if has_widgets else None
 
                 # Cache key includes both SRT identity and OSD frame index so
@@ -1222,7 +1224,9 @@ def _chroma_key_pipeline(
                 if td and config.show_srt_bar:
                     srt_text = td.status_line(config.srt_enabled_fields)
 
-                tframe = TelemetryFrame(td, raw_osd_frame, firmware=config.firmware) \
+                tframe = TelemetryFrame(td, raw_osd_frame, firmware=config.firmware,
+                                        osd_font=font, srt_file=srt_data,
+                                        osd_file=osd_data) \
                     if has_widgets else None
 
                 if has_widgets:

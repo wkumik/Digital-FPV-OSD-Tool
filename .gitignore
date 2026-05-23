@@ -10,3 +10,23 @@ dist/
 *.egg-info/
 .DS_Store
 Thumbs.db
+
+# Runtime / user state (preserved by the updater, never shipped)
+settings.json
+theme_custom.json
+*.log
+
+# Windows shortcuts
+*.lnk
+
+# Stray debug / diagnostic artifacts (root only — real assets live in fonts/)
+/font_grid.png
+/font_slim.png
+/font_slim_big.png
+/font_strip.png
+/widgets_smoke.png
+
+# Editor / tooling
+.claude/
+.vscode/
+.idea/

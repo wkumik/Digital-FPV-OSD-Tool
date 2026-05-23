@@ -1541,12 +1541,26 @@ class PlayerController:
             if not data or len(data) < nbytes:
                 break
 
+            # Intended wall-clock display moment + video timestamp for this
+            # frame, computed before the expensive composite so we can decide
+            # whether we're already too late to show it.
+            deadline = t0 + frame_idx * frame_dur / speed
+            if pts and (pts_base_idx + frame_idx) < len(pts):
+                video_time_s = pts[pts_base_idx + frame_idx]
+            else:
+                video_time_s = seek + frame_idx * frame_dur
+            frame_idx += 1
+
+            # Frame dropping: when compositing (OSD grid + widgets + map) can't
+            # keep up, skip this frame's composite + display so playback stays
+            # locked to real time instead of drifting into slow motion. The raw
+            # pipe read above already happened, so FFmpeg keeps streaming — we
+            # just discard frames we're too late to show. Threshold is one
+            # displayed-frame interval (frame_dur / speed).
+            if (time.monotonic() - deadline) > frame_dur / speed:
+                continue
+
             try:
-                # Use PTS list for accurate time when available
-                if pts and (pts_base_idx + frame_idx) < len(pts):
-                    video_time_s = pts[pts_base_idx + frame_idx]
-                else:
-                    video_time_s = seek + frame_idx * frame_dur
                 pct_norm = video_time_s / self.video_dur if self.video_dur > 0 else 0.0
                 pct_sl = int(pct_norm * _SL_MAX)
 
@@ -1561,17 +1575,13 @@ class PlayerController:
                 with self._buf_lock:
                     self._buf_frame = composited
                     self._buf_pct = pct_norm
-
-                frame_idx += 1
-
-                # Pace to real-time (adjusted by speed)
-                deadline = t0 + frame_idx * frame_dur / speed
-                sleep_s = deadline - time.monotonic()
-                if sleep_s > 0.002:
-                    time.sleep(sleep_s)
-
             except Exception:
-                frame_idx += 1
+                pass
+
+            # Pace to real-time (adjusted by speed) — only sleep when ahead.
+            sleep_s = deadline - time.monotonic()
+            if sleep_s > 0.002:
+                time.sleep(sleep_s)
 
         if not stop.is_set():
             QTimer.singleShot(0, self._on_playback_finished)
