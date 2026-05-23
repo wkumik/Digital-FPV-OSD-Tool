@@ -9,6 +9,7 @@ Imported by _widget_draw.py and _widget_map.py. Not part of the public API.
 from __future__ import annotations
 
 import math
+import os
 from typing import Any
 
 try:
@@ -16,6 +17,12 @@ try:
     PIL_OK = True
 except ImportError:
     PIL_OK = False
+
+# Bundled widget font: Roboto Mono Medium (500) — clean, even-width digits for
+# numeric readouts. Resolved relative to this module so it works in dev and in
+# the PyInstaller build (assets/ is shipped alongside, same as icon.png).
+_BUNDLED_FONT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "assets", "RobotoMono-Medium.ttf")
 
 
 # ----- Colour parsing --------------------------------------------------------
@@ -47,16 +54,24 @@ _FONT_CACHE: dict[int, Any] = {}
 
 
 def _font(size: int) -> Any:
-    """Return a cached TrueType font at the requested pixel size."""
+    """Return a cached TrueType font at the requested pixel size.
+
+    Prefers the bundled Roboto Mono Medium; falls back to system Arial /
+    DejaVu and finally PIL's built-in default if none are available.
+    """
     size = max(6, int(size))
     if size not in _FONT_CACHE:
-        try:
-            _FONT_CACHE[size] = PILFont.truetype("arial.ttf", size)
-        except Exception:
+        for loader in (
+            lambda: PILFont.truetype(_BUNDLED_FONT, size),
+            lambda: PILFont.truetype("arial.ttf", size),
+            lambda: PILFont.truetype("DejaVuSans.ttf", size),
+            PILFont.load_default,
+        ):
             try:
-                _FONT_CACHE[size] = PILFont.truetype("DejaVuSans.ttf", size)
+                _FONT_CACHE[size] = loader()
+                break
             except Exception:
-                _FONT_CACHE[size] = PILFont.load_default()
+                continue
     return _FONT_CACHE[size]
 
 

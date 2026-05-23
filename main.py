@@ -2627,7 +2627,7 @@ class MainWindow(QMainWindow):
                     break
         new_w = Widget(type="digital", source=default_source,
                        x=0.5, y=0.10, w=0.18, h=0.06,
-                       style={"label": "", "color": "#FFEE55"})
+                       style={"label": "", "color": "#FFFFFF"})
         self._widgets.append(new_w)
         self._refresh_widget_list()
         # Select the new one
