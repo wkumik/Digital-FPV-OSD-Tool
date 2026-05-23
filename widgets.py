@@ -356,24 +356,6 @@ class TelemetryFrame:
         return float(gaps[len(gaps) // 2])
 
 
-class _VisualWidgetValue:
-    """Float-like wrapper: geometry sees visual_value, text formats text_value."""
-    __slots__ = ("visual_value", "text_value")
-
-    def __init__(self, visual_value: float, text_value: float):
-        self.visual_value = visual_value
-        self.text_value = text_value
-
-    def __float__(self) -> float:
-        return float(self.visual_value)
-
-    def __format__(self, spec: str) -> str:
-        return format(self.text_value, spec)
-
-    def __str__(self) -> str:
-        return str(self.text_value)
-
-
 # ----- Value resolution ------------------------------------------------------
 
 def _get_value(telemetry: Any, source: str) -> tuple[Optional[float], str, str]:
@@ -403,7 +385,7 @@ def _get_widget_value(telemetry: Any, widget: Widget) -> tuple[Optional[Any], st
     visual = get_visual(widget.source, smoothness)
     if visual is None:
         return value, unit, fmt
-    return _VisualWidgetValue(float(visual), float(value)), unit, fmt
+    return float(visual), unit, fmt
 
 
 # ----- Dispatch --------------------------------------------------------------

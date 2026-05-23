@@ -59,7 +59,7 @@ class WidgetSmoothingTest(unittest.TestCase):
         self.assertEqual(telemetry._lookahead_ms(3.0, 100.0), 405)
         self.assertGreater(telemetry.get_osd_visual_value("osd_speed_kmh", 3.0), 50.0)
 
-    def test_widget_visual_value_keeps_text_value_exact(self):
+    def test_widget_text_uses_smoothed_value_too(self):
         osd = OsdFile(
             frames=[
                 speed_frame(0, 0, "0"),
@@ -85,7 +85,7 @@ class WidgetSmoothingTest(unittest.TestCase):
         value, _unit, fmt = _get_widget_value(telemetry, widget)
 
         self.assertGreater(float(value), 50.0)
-        self.assertEqual(_format_value(value, fmt, fmt), "0")
+        self.assertNotEqual(_format_value(value, fmt, fmt), "0")
 
     def test_alpha_beta_visual_track_avoids_sparse_sample_bounce(self):
         osd = OsdFile(
