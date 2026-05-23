@@ -87,6 +87,38 @@ class WidgetSmoothingTest(unittest.TestCase):
         self.assertGreater(float(value), 50.0)
         self.assertEqual(_format_value(value, fmt, fmt), "0")
 
+    def test_alpha_beta_visual_track_avoids_sparse_sample_bounce(self):
+        osd = OsdFile(
+            frames=[
+                speed_frame(0, 0, "40"),
+                speed_frame(1, 75, "38"),
+                speed_frame(2, 150, "43"),
+                speed_frame(3, 225, "52"),
+                speed_frame(4, 300, "52"),
+                speed_frame(5, 375, "50"),
+            ],
+            timestamps=[0, 75, 150, 225, 300, 375],
+            grid_cols=5,
+            grid_rows=1,
+        )
+        values = []
+        for t in range(0, 260, 16):
+            frame = osd.frame_at_time(t)
+            telemetry = TelemetryFrame(
+                osd_frame=frame,
+                firmware="ArduPilot",
+                osd_file=osd,
+                osd_time_ms=t,
+            )
+            values.append(telemetry.get_osd_visual_value("osd_speed_kmh", 10.0))
+
+        for prev, current, nxt in zip(values, values[1:], values[2:]):
+            self.assertFalse(
+                abs(current - prev) > 0.05
+                and abs(nxt - current) > 0.05
+                and (current - prev) * (nxt - current) < 0
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

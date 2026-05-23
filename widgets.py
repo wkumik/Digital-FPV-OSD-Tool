@@ -41,6 +41,8 @@ from _widget_map import _draw_map, invalidate_track_caches  # noqa: F401 (re-exp
 
 OSD_WIDGET_MAX_GAP_MS = 1500
 OSD_WIDGET_FILTER_WARMUP_MS = 3000
+OSD_WIDGET_FILTER_STEP_MS = 16
+_VISUAL_TRACK_CACHE: dict[tuple[int, str, str, float, tuple], tuple[list[int], list[float]]] = {}
 
 
 # ----- Widget model ----------------------------------------------------------
@@ -250,39 +252,93 @@ class TelemetryFrame:
             return None
         sample_ms = self._median_sample_ms(timestamps)
         lookahead_ms = self._lookahead_ms(smoothness, sample_ms)
-        target_time = min(int(self.osd_time_ms) + lookahead_ms, timestamps[-1])
-        start_time = max(timestamps[0], target_time - OSD_WIDGET_FILTER_WARMUP_MS)
-        start_idx = max(0, bisect.bisect_left(timestamps, start_time) - 1)
-        end_idx = min(len(frames) - 1, bisect.bisect_right(timestamps, target_time))
-        alpha_gain, beta_gain = self._alpha_beta_params(smoothness)
+        track = self._visual_track(key, smoothness)
+        if track is None:
+            return None
+        track_times, track_values = track
+        target_time = min(int(self.osd_time_ms) + lookahead_ms, track_times[-1])
+        return self._sample_track(track_times, track_values, target_time)
 
+    def _visual_track(self, key: str, smoothness: float) -> Optional[tuple[list[int], list[float]]]:
+        frames = getattr(self.osd_file, "frames", None)
+        timestamps = getattr(self.osd_file, "timestamps", None)
+        if not frames or not timestamps:
+            return None
+        cache_key = (
+            id(self.osd_file),
+            self._fw,
+            key,
+            round(smoothness, 3),
+            tuple(sorted(self._slim_map.items())),
+        )
+        cached = _VISUAL_TRACK_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+        sample_ms = self._median_sample_ms(timestamps)
+        lookahead_ms = self._lookahead_ms(smoothness, sample_ms)
+        alpha_gain, beta_gain = self._alpha_beta_params(smoothness)
+        start_t = timestamps[0]
+        end_t = timestamps[-1]
+        track_times: list[int] = []
+        track_values: list[float] = []
         x = None
         velocity = 0.0
         last_t = None
-        for idx in range(start_idx, end_idx + 1):
-            frame = frames[idx]
-            if frame.time_ms > target_time:
-                break
-            measurement = _osd_extract(frame, key, self._fw, slim_map=self._slim_map)
+
+        for t in range(start_t, end_t + OSD_WIDGET_FILTER_STEP_MS,
+                       OSD_WIDGET_FILTER_STEP_MS):
+            t = min(t, end_t)
+            measurement = self._interpolated_osd_value(key, t)
             if measurement is None:
+                if x is not None:
+                    dt_ms = (t - last_t) if last_t is not None else OSD_WIDGET_FILTER_STEP_MS
+                    dt_s = max(0.001, dt_ms / 1000.0)
+                    x = x + velocity * dt_s
+                    last_t = t
+                    track_times.append(t)
+                    track_values.append(float(x))
+                if t >= end_t:
+                    break
                 continue
-            t = frame.time_ms
             if x is None:
                 x = measurement
+                velocity = 0.0
                 last_t = t
-                continue
-            dt_s = max(0.001, (t - last_t) / 1000.0)
-            x_pred = x + velocity * dt_s
-            residual = measurement - x_pred
-            x = x_pred + alpha_gain * residual
-            velocity = velocity + beta_gain * residual / dt_s
-            last_t = t
+            else:
+                dt_s = max(0.001, (t - last_t) / 1000.0)
+                x_pred = x + velocity * dt_s
+                residual = measurement - x_pred
+                x = x_pred + alpha_gain * residual
+                velocity = velocity + beta_gain * residual / dt_s
+                last_t = t
+            track_times.append(t)
+            track_values.append(float(x))
+            if t >= end_t:
+                break
 
-        if x is None:
+        if not track_times:
             return None
-        if last_t is not None and target_time > last_t:
-            x += velocity * ((target_time - last_t) / 1000.0)
-        return x
+        result = (track_times, track_values)
+        if len(_VISUAL_TRACK_CACHE) > 64:
+            _VISUAL_TRACK_CACHE.clear()
+        _VISUAL_TRACK_CACHE[cache_key] = result
+        return result
+
+    @staticmethod
+    def _sample_track(times: list[int], values: list[float], time_ms: int) -> float:
+        if time_ms <= times[0]:
+            return values[0]
+        if time_ms >= times[-1]:
+            return values[-1]
+        idx = bisect.bisect_right(times, time_ms) - 1
+        idx = max(0, min(idx, len(times) - 2))
+        t0 = times[idx]
+        t1 = times[idx + 1]
+        if t1 <= t0:
+            return values[idx]
+        alpha = (time_ms - t0) / (t1 - t0)
+        return values[idx] + (values[idx + 1] - values[idx]) * alpha
 
     @staticmethod
     def _median_sample_ms(timestamps) -> float:
