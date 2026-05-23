@@ -5,7 +5,7 @@ VueOSD — Digital FPV OSD Tool
 Parse and overlay MSP-OSD data onto FPV DVR video footage.
 """
 
-import sys, os, math, threading, subprocess, json, time
+import sys, os, math, threading, subprocess, json
 
 # ── Windows: set AppUserModelID so taskbar shows our icon, not Python's ───────
 if sys.platform == "win32":
@@ -23,23 +23,27 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QFileDialog, QProgressBar, QGroupBox,
     QCheckBox, QSlider, QComboBox, QGridLayout, QMessageBox,
     QSizePolicy, QSplitter, QScrollArea, QSpinBox, QFrame,
-    QDialog, QLineEdit,
+    QDialog, QLineEdit, QListWidget, QListWidgetItem, QDoubleSpinBox,
+    QColorDialog,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRect, QUrl
-from PyQt6.QtGui import (QFont, QPixmap, QImage, QPainter, QColor, QPen, QIcon,
-                         QDesktopServices, QStandardItem, QStandardItemModel)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import (QFont, QPixmap, QImage, QPainter, QColor, QIcon,
+                         QStandardItem, QStandardItemModel)
 
 
 from srt_parser    import parse_srt, SrtFile, SRT_FIELDS
 from osd_parser    import parse_osd, OsdFile, GRID_COLS, GRID_ROWS
 from p1_osd_parser import detect_p1, parse_p1_osd, p1_to_osd_file
-from font_loader   import (fonts_by_firmware, load_font, load_font_from_file,
+from font_loader   import (fonts_by_firmware, load_font,
                            OsdFont, FIRMWARE_PREFIXES)
 from osd_renderer  import OsdRenderConfig, render_osd_frame, render_fallback
+from widgets       import (Widget, widgets_from_list, WIDGET_DATA_SOURCES,
+                            TelemetryFrame, invalidate_track_caches)
 from video_processor import (ProcessingConfig, ColorTransConfig, process_video,
                              get_video_info, get_frame_pts, find_ffmpeg,
                              detect_hw_encoder, detect_libplacebo)
 from splash_screen   import SplashScreen
+import updater
 
 
 try:
@@ -48,7 +52,7 @@ try:
 except ImportError:
     PIL_OK = False
 
-from subprocess_utils import _hidden_popen, _hidden_run
+from subprocess_utils import _hidden_popen
 
 
 # ─── Theme system ─────────────────────────────────────────────────────────────
@@ -59,7 +63,7 @@ _DARK_THEME = True   # module-level flag; toggled by the theme button
 
 # ─── Version & UI scale ───────────────────────────────────────────────────────
 
-VERSION = "1.6"
+VERSION = "1.7"
 
 _UI_SCALE = 1.0
 _SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -71,15 +75,17 @@ def _fs(n: int) -> int:
 _OSD_OFFSET_MS = 0  # persisted OSD sync offset (ms)
 
 _COLORTRANS_SETTINGS: dict = {}  # loaded from settings.json "colortrans" key
+_WIDGET_SETTINGS:     list = []  # loaded from settings.json "widgets" key
 
 def _load_settings():
-    global _UI_SCALE, _OSD_OFFSET_MS, _COLORTRANS_SETTINGS
+    global _UI_SCALE, _OSD_OFFSET_MS, _COLORTRANS_SETTINGS, _WIDGET_SETTINGS
     try:
         with open(_SETTINGS_FILE) as f:
             data = json.load(f)
         _UI_SCALE      = float(data.get("ui_scale", 1.0))
         _OSD_OFFSET_MS = int(data.get("osd_offset_ms", 0))
         _COLORTRANS_SETTINGS = data.get("colortrans", {})
+        _WIDGET_SETTINGS     = data.get("widgets", []) or []
     except Exception:
         pass
 
@@ -633,6 +639,78 @@ def _sep():
     return f
 
 
+# ─── Updater workers ──────────────────────────────────────────────────────────
+#
+# Both run on background QThreads. The check is a quick GitHub API ping at
+# startup; the install does the download + extract + file copy. UI bits stay
+# on the GUI thread via Qt signals.
+
+class _UpdateCheckWorker(QThread):
+    finished_with_result = pyqtSignal(object)  # ReleaseInfo or None
+
+    def __init__(self, current_version: str):
+        super().__init__()
+        self._current = current_version
+
+    def run(self):
+        info = updater.find_update(self._current, timeout=5.0)
+        self.finished_with_result.emit(info)
+
+
+class _UpdateInstallWorker(QThread):
+    progress = pyqtSignal(int, str)
+    done     = pyqtSignal(object)  # None on success, str on error
+
+    def __init__(self, release, install_dir: str):
+        super().__init__()
+        self._release = release
+        self._install_dir = install_dir
+
+    def run(self):
+        try:
+            updater.download_and_apply(
+                self._release, self._install_dir,
+                progress_cb=lambda pct, msg: self.progress.emit(int(pct), msg),
+            )
+            self.done.emit(None)
+        except Exception as e:
+            self.done.emit(str(e))
+
+
+class _FontsDownloadWorker(QThread):
+    """Background worker for the manual "Download fonts" button.
+
+    Step 1 (looking up the asset) and step 2 (downloading + extracting) both
+    run here so the GUI thread never blocks on the network.
+    """
+    progress = pyqtSignal(int, str)
+    # done(error_str_or_None, font_count_int)
+    done     = pyqtSignal(object, int)
+
+    def __init__(self, install_dir: str):
+        super().__init__()
+        self._install_dir = install_dir
+
+    def run(self):
+        self.progress.emit(0, "Looking for fonts.zip on GitHub...")
+        asset = updater.find_fonts_asset(timeout=5.0)
+        if asset is None:
+            self.done.emit(
+                "Couldn't find a fonts.zip asset in the 10 most recent "
+                "GitHub releases. The maintainer needs to attach one to a "
+                "release at:\n\nhttps://github.com/" + updater.GITHUB_REPO
+                + "/releases", 0)
+            return
+        try:
+            n = updater.download_fonts(
+                asset, self._install_dir,
+                progress_cb=lambda pct, msg: self.progress.emit(int(pct), msg),
+            )
+            self.done.emit(None, n)
+        except Exception as e:
+            self.done.emit(str(e), 0)
+
+
 # ─── Main Window ──────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
@@ -648,6 +726,12 @@ class MainWindow(QMainWindow):
         self._font_db:   dict = {}
         self.source_mbps: float = 0.0   # source video bitrate, set after loading
         self._dividers:    list = []   # legacy, kept for compat
+        # Custom telemetry widgets — loaded from settings.json "widgets" key.
+        # Phase 1: edit JSON by hand; UI for drag-placement comes in Phase 2.
+        self._widgets = widgets_from_list(_WIDGET_SETTINGS)
+        # Current firmware identifier. Updated by _on_fw_changed when the OSD
+        # header reveals BTFL / INAV / ARDU. Used by the OSD glyph decoder.
+        self._current_firmware: str = "INAV"
 
         self.setWindowTitle(f"VueOSD v{VERSION} — Digital FPV OSD Tool")
         # App icon — resolved relative to this script so it works from any CWD
@@ -684,6 +768,14 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(200, lambda: self._on_fw_changed("Betaflight"))
         QTimer.singleShot(300, self._cc_restore_from_settings)
+        # Populate the widgets list from settings.json after the panel exists.
+        QTimer.singleShot(0, self._refresh_widget_list)
+        # Update check fires on a delay so the window is fully painted first.
+        # Network I/O happens off the GUI thread, the dialog only appears
+        # if a newer release exists AND the user hasn't skipped it.
+        self._update_thread = None
+        self._update_worker = None
+        QTimer.singleShot(2000, self._start_update_check)
 
     def _build_left_panel(self) -> "QScrollArea":
         """Build and return the left scrollable panel."""
@@ -855,6 +947,18 @@ class MainWindow(QMainWindow):
         hd_row.addWidget(self._custom_btn)
         fontgl.addLayout(hd_row)
 
+        # Download fonts from GitHub. Pulls the latest `fonts.zip` asset
+        # attached to any recent release (release source itself ships slim
+        # via .gitattributes export-ignore - see updater.py).
+        self._download_fonts_btn = QPushButton("↓  Download fonts from GitHub")
+        self._download_fonts_btn.setStyleSheet(BTN_SEC)
+        self._download_fonts_btn.setFixedHeight(26)
+        self._download_fonts_btn.setToolTip(
+            "Fetch the bundled font pack (BTFL / INAV / ArduPilot) from the "
+            "project's GitHub releases and install it into the fonts/ folder.")
+        self._download_fonts_btn.clicked.connect(self._on_download_fonts)
+        fontgl.addWidget(self._download_fonts_btn)
+
         self.font_lbl = QLabel("No font loaded")
         self.font_lbl.setStyleSheet(f"color:{_T()['orange']};font-size:10px;")
         self.font_lbl.setWordWrap(True)
@@ -883,7 +987,7 @@ class MainWindow(QMainWindow):
         _fields_lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
         self.srt_fields_combo = CheckableComboBox()
         self.srt_fields_combo.add_items(SRT_FIELDS)
-        self.srt_fields_combo.setStyleSheet(f"font-size:11px;")
+        self.srt_fields_combo.setStyleSheet("font-size:11px;")
         self.srt_fields_combo.selectionChanged.connect(lambda _: self._refresh_preview())
 
         note2 = QLabel("Radio signal, bitrate, GPS, altitude from .srt.\n"
@@ -899,10 +1003,169 @@ class MainWindow(QMainWindow):
         srtgl.addWidget(note2)
         ll.addWidget(srtg)
 
+        # ── Custom Widgets group ─────────────────────────────────────────────
+        self._build_widget_group(ll)
+
         ll.addStretch()
         left_scroll.setWidget(left_inner)
         self._left_scroll = left_scroll   # saved for theme reapply
         return left_scroll
+
+    def _build_widget_group(self, ll):
+        """Build the Custom Widgets group and add it to the left-panel layout.
+
+        Holds the widget list, add/remove buttons, edit-mode toggle, and a
+        properties section for the currently selected widget.
+        """
+        t = _T()
+        wg = QGroupBox("Custom Widgets")
+        wg.setStyleSheet(GROUP_STYLE)
+        wgl = QVBoxLayout(wg)
+        wgl.setSpacing(4)
+        wgl.setContentsMargins(10, 16, 10, 10)
+
+        # Edit-mode toggle — when on, the canvas draws selection chrome and
+        # captures mouse drags so widgets can be repositioned.
+        self.widget_edit_btn = QPushButton("✎  Edit on canvas")
+        self.widget_edit_btn.setCheckable(True)
+        self.widget_edit_btn.setStyleSheet(BTN_SEC)
+        self.widget_edit_btn.setFixedHeight(26)
+        self.widget_edit_btn.setToolTip(
+            "Toggle edit mode. When on, drag widgets directly on the video preview.")
+        self.widget_edit_btn.toggled.connect(self._on_widget_edit_toggled)
+        wgl.addWidget(self.widget_edit_btn)
+
+        # Widget list — one row per widget. populated by _refresh_widget_list().
+        self.widget_list = QListWidget()
+        self.widget_list.setStyleSheet(
+            f"QListWidget{{background:{t['bg2']};color:{t['text']};"
+            f"border:1px solid {t['border']};border-radius:4px;font-size:{_fs(11)}px;}}"
+            f"QListWidget::item:selected{{background:{t['accent']};color:#ffffff;}}"
+        )
+        self.widget_list.setFixedHeight(120)
+        self.widget_list.currentRowChanged.connect(self._on_widget_list_selected)
+        wgl.addWidget(self.widget_list)
+
+        # Add / remove buttons
+        wbtn_row = QHBoxLayout()
+        wbtn_row.setSpacing(4)
+        self.widget_add_btn = QPushButton("＋ Add")
+        self.widget_add_btn.setStyleSheet(BTN_SEC)
+        self.widget_add_btn.setFixedHeight(26)
+        self.widget_add_btn.clicked.connect(self._on_widget_add)
+        self.widget_remove_btn = QPushButton("− Remove")
+        self.widget_remove_btn.setStyleSheet(BTN_SEC)
+        self.widget_remove_btn.setFixedHeight(26)
+        self.widget_remove_btn.clicked.connect(self._on_widget_remove)
+        wbtn_row.addWidget(self.widget_add_btn)
+        wbtn_row.addWidget(self.widget_remove_btn)
+        wgl.addLayout(wbtn_row)
+
+        # ── Properties section for selected widget ──────────────────────
+        self._wprops = QWidget()
+        wp = QGridLayout(self._wprops)
+        wp.setContentsMargins(0, 6, 0, 0)
+        wp.setHorizontalSpacing(6)
+        wp.setVerticalSpacing(4)
+
+        def _lbl(text):
+            l = QLabel(text)
+            l.setStyleSheet(f"color:{t['subtext']};font-size:{_fs(11)}px;")
+            return l
+
+        # Source first - users pick what data they want to show, then the
+        # widget type/skin for displaying it.
+        row = 0
+        wp.addWidget(_lbl("Source"), row, 0)
+        self.wp_source = QComboBox()
+        for key, name, *_ in WIDGET_DATA_SOURCES:
+            self.wp_source.addItem(name, key)
+        self.wp_source.currentIndexChanged.connect(self._on_widget_prop_changed)
+        wp.addWidget(self.wp_source, row, 1, 1, 2)
+        row += 1
+
+        wp.addWidget(_lbl("Type"), row, 0)
+        self.wp_type = QComboBox()
+        self.wp_type.addItem("Digital readout", "digital")
+        self.wp_type.addItem("Linear bar",       "bar")
+        self.wp_type.addItem("Circular gauge",   "gauge")
+        self.wp_type.addItem("Semicircle gauge", "semicircle")
+        self.wp_type.addItem("Tick dial",        "tickdial")
+        self.wp_type.addItem("Ring gauge",       "ring")
+        self.wp_type.addItem("Analog dial",      "analog")
+        self.wp_type.currentIndexChanged.connect(self._on_widget_prop_changed)
+        wp.addWidget(self.wp_type, row, 1, 1, 2)
+        row += 1
+
+        wp.addWidget(_lbl("Label"), row, 0)
+        self.wp_label = QLineEdit()
+        self.wp_label.setPlaceholderText("(no label)")
+        self.wp_label.editingFinished.connect(self._on_widget_prop_changed)
+        wp.addWidget(self.wp_label, row, 1, 1, 2)
+        row += 1
+
+        wp.addWidget(_lbl("Color"), row, 0)
+        self.wp_color = QLineEdit("#FFFFFF")
+        self.wp_color.setMaxLength(9)
+        self.wp_color.editingFinished.connect(self._on_widget_prop_changed)
+        wp.addWidget(self.wp_color, row, 1)
+        self.wp_color_btn = QPushButton("…")
+        self.wp_color_btn.setFixedWidth(28)
+        self.wp_color_btn.setFixedHeight(22)
+        self.wp_color_btn.setStyleSheet(BTN_SEC)
+        self.wp_color_btn.clicked.connect(self._on_widget_pick_color)
+        wp.addWidget(self.wp_color_btn, row, 2)
+        row += 1
+
+        wp.addWidget(_lbl("Min / Max"), row, 0)
+        mm_row = QHBoxLayout()
+        mm_row.setSpacing(3)
+        self.wp_min = QDoubleSpinBox()
+        self.wp_min.setRange(-99999.0, 99999.0)
+        self.wp_min.setDecimals(2)
+        self.wp_min.setValue(0.0)
+        self.wp_min.valueChanged.connect(self._on_widget_prop_changed)
+        self.wp_max = QDoubleSpinBox()
+        self.wp_max.setRange(-99999.0, 99999.0)
+        self.wp_max.setDecimals(2)
+        self.wp_max.setValue(100.0)
+        self.wp_max.valueChanged.connect(self._on_widget_prop_changed)
+        mm_row.addWidget(self.wp_min)
+        mm_row.addWidget(self.wp_max)
+        mm_w = QWidget()
+        mm_w.setLayout(mm_row)
+        wp.addWidget(mm_w, row, 1, 1, 2)
+        row += 1
+
+        wp.addWidget(_lbl("Width"), row, 0)
+        self.wp_w = QSlider(Qt.Orientation.Horizontal)
+        self.wp_w.setRange(2, 60)      # 2-60% of source width
+        self.wp_w.setValue(15)
+        self.wp_w.valueChanged.connect(self._on_widget_prop_changed)
+        wp.addWidget(self.wp_w, row, 1, 1, 2)
+        row += 1
+
+        wp.addWidget(_lbl("Height"), row, 0)
+        self.wp_h = QSlider(Qt.Orientation.Horizontal)
+        self.wp_h.setRange(2, 60)
+        self.wp_h.setValue(8)
+        self.wp_h.valueChanged.connect(self._on_widget_prop_changed)
+        wp.addWidget(self.wp_h, row, 1, 1, 2)
+        row += 1
+
+        wgl.addWidget(self._wprops)
+
+        wnote = QLabel("Widgets read live telemetry from the SRT track. "
+                       "Toggle edit mode then drag on the preview to reposition.")
+        wnote.setStyleSheet(f"color:{t['muted']};font-size:10px;")
+        wnote.setWordWrap(True)
+        wgl.addWidget(wnote)
+
+        ll.addWidget(wg)
+
+        # Initial UI state
+        self._wprops.setEnabled(False)
+        self.widget_remove_btn.setEnabled(False)
 
     def _build_centre_panel(self) -> QWidget:
         """Build and return the centre panel (player + controls)."""
@@ -951,6 +1214,12 @@ class MainWindow(QMainWindow):
         _canvas.regionAdded.connect(self._on_region_added)
         _canvas.regionRemoveRequested.connect(self._on_region_remove)
         _canvas.resized.connect(self._sync_region_overlay)
+        # Widget editing — geometry callback + signal connections
+        _canvas.set_widget_src_rect_fn(self._widget_canvas_src_rect)
+        _canvas.set_widgets(self._widgets)
+        _canvas.widgetSelected.connect(self._on_widget_canvas_selected)
+        _canvas.widgetMoved.connect(self._on_widget_canvas_moved)
+        _canvas.widgetCommit.connect(self._on_widget_canvas_commit)
 
         # Create frame_info alias for theme code
         self.frame_info = self._player_panel.transport.info_lbl
@@ -985,6 +1254,16 @@ class MainWindow(QMainWindow):
         pos_note = QLabel("OSD auto-fitted to video height, centred.")
         pos_note.setStyleSheet(f"color:{_T()['muted']};font-size:10px;")
         posgl.addWidget(pos_note)
+
+        # Master toggle for the MSP OSD glyph grid. Turn off to render widgets
+        # alone (and still see the SRT bar if enabled).
+        self.osd_show_check = QCheckBox("Show OSD glyphs")
+        self.osd_show_check.setChecked(True)
+        self.osd_show_check.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
+        self.osd_show_check.setToolTip(
+            "Hide the MSP OSD glyph grid. Widgets and the SRT bar are unaffected.")
+        self.osd_show_check.stateChanged.connect(self._refresh_preview)
+        posgl.addWidget(self.osd_show_check)
 
         self.sl_x     = LabeledSlider("X offset", -1200, 1200, 0, " px")
         self.sl_y     = LabeledSlider("Y offset",  -800,  800, 0, " px")
@@ -1574,6 +1853,7 @@ class MainWindow(QMainWindow):
     # ── Font ──────────────────────────────────────────────────────────────────
 
     def _on_fw_changed(self, fw):
+        self._current_firmware = fw
         self._font_db = fonts_by_firmware(fw)
         self.style_combo.blockSignals(True)
         self.style_combo.clear()
@@ -1647,6 +1927,11 @@ class MainWindow(QMainWindow):
         ext = os.path.splitext(path)[1].lower()
         if ext in ('.mp4', '.mkv', '.avi', '.mov'):
             self.video_row.set_path(path)
+            # Clear companion data from the previous flight so the map
+            # doesn't show a stale track if the new video has no .srt/.osd.
+            self.srt_data = None
+            self.osd_data = None
+            invalidate_track_caches()
             self._load_video(path)
             self._auto_detect(path)
         elif ext == '.osd':
@@ -1858,6 +2143,9 @@ class MainWindow(QMainWindow):
                                             "Video (*.mp4 *.mkv *.avi *.mov)")
         if not p: return
         self.video_row.set_path(p)
+        self.srt_data = None
+        self.osd_data = None
+        invalidate_track_caches()
         self._load_video(p)
         self._auto_detect(p)
 
@@ -1958,6 +2246,7 @@ class MainWindow(QMainWindow):
         try:
             fps = getattr(self, 'video_fps', 60.0) or 60.0
             self.osd_data = parse_osd(path, video_fps=fps)
+            invalidate_track_caches()
             s = self.osd_data.stats
             self.osd_card.clear()
             self.osd_card.add_row("FC",   s.fc_type or "Unknown")
@@ -2029,6 +2318,7 @@ class MainWindow(QMainWindow):
     def _load_srt(self, path):
         try:
             self.srt_data = parse_srt(path)
+            invalidate_track_caches()
             self.srt_card.clear()
             self.srt_card.add_row("Entries", str(len(self.srt_data.entries)))
             self.srt_card.add_row("Dur", f"{self.srt_data.duration_ms/1000:.1f}s")
@@ -2208,6 +2498,262 @@ class MainWindow(QMainWindow):
         self._refresh_preview()
         self._save_project_state()
 
+    # ── Custom widgets ────────────────────────────────────────────────────────
+
+    def _widget_canvas_src_rect(self):
+        """Return (sx, sy, sw, sh) — the SOURCE video rectangle in canvas px,
+        or None if no frame is loaded.  Used by VideoCanvas to convert between
+        normalised widget coords and on-screen positions."""
+        pp = getattr(self, "_player_panel", None)
+        if pp is None:
+            return None
+        canvas = pp.canvas
+        if not canvas.has_frame():
+            return None
+        ox, oy = canvas.display_origin()
+        dw, dh = canvas.display_size()
+        ctrl = pp.controller
+        cw, ch, _sx, _sy = self._current_canvas_dims()
+        vw = getattr(ctrl, "video_w", 0)
+        vh = getattr(ctrl, "video_h", 0)
+        if cw <= 0 or ch <= 0 or vw <= 0 or vh <= 0:
+            # No aspect-pad info yet — base pixmap IS the source.
+            return ox, oy, dw, dh
+        # Display-size source dims = source dims × (display / original canvas).
+        src_w_disp = int(round(vw * (dw / cw)))
+        src_h_disp = int(round(vh * (dh / ch)))
+        sx = ox + (dw - src_w_disp) // 2
+        sy = oy + (dh - src_h_disp) // 2
+        return sx, sy, src_w_disp, src_h_disp
+
+    def _save_widget_settings(self):
+        """Persist self._widgets to settings.json under the 'widgets' key."""
+        _save_settings(widgets=[w.to_dict() for w in self._widgets])
+
+    def _refresh_widget_list(self):
+        """Repopulate the widget QListWidget rows from self._widgets."""
+        if not hasattr(self, "widget_list"):
+            return
+        self.widget_list.blockSignals(True)
+        self.widget_list.clear()
+        for w in self._widgets:
+            src_label = next((name for k, name, *_ in WIDGET_DATA_SOURCES
+                              if k == w.source), w.source)
+            item = QListWidgetItem(f"{w.type} · {src_label}")
+            self.widget_list.addItem(item)
+        self.widget_list.blockSignals(False)
+        # Sync canvas mirror + selection chrome
+        pp = getattr(self, "_player_panel", None)
+        if pp is not None:
+            pp.canvas.set_widgets(self._widgets)
+        self.widget_remove_btn.setEnabled(bool(self._widgets))
+
+    def _apply_widget_to_props(self, idx: int):
+        """Populate the properties section from widgets[idx]. Blocks signals
+        during the population so we don't recursively trigger _on_widget_prop_changed."""
+        if not (0 <= idx < len(self._widgets)):
+            self._wprops.setEnabled(False)
+            return
+        w = self._widgets[idx]
+        controls = [self.wp_type, self.wp_source, self.wp_label, self.wp_color,
+                    self.wp_min, self.wp_max, self.wp_w, self.wp_h]
+        for c in controls:
+            c.blockSignals(True)
+        try:
+            # Type
+            ti = self.wp_type.findData(w.type)
+            self.wp_type.setCurrentIndex(ti if ti >= 0 else 0)
+            # Source
+            si = self.wp_source.findData(w.source)
+            self.wp_source.setCurrentIndex(si if si >= 0 else 0)
+            # Label (digital-readout only)
+            self.wp_label.setText(str(w.style.get("label", "")))
+            # Color
+            self.wp_color.setText(str(w.style.get("color", "#FFFFFF")))
+            # Min/Max (bar+gauge only)
+            self.wp_min.setValue(float(w.style.get("min", 0.0)))
+            self.wp_max.setValue(float(w.style.get("max", 100.0)))
+            # Size
+            self.wp_w.setValue(max(2, min(60, int(round(w.w * 100)))))
+            self.wp_h.setValue(max(2, min(60, int(round(w.h * 100)))))
+        finally:
+            for c in controls:
+                c.blockSignals(False)
+        # Visibility: label is meaningful for digital readouts and the analog
+        # dial (which prints it inside the face); min/max apply to every
+        # value-scaled type (bar, gauge, semicircle, tickdial, ring, analog).
+        # Map is selected via source="gps_track"; type is then locked to "map"
+        # automatically and the type combo is disabled.
+        is_digital = w.type == "digital"
+        is_map     = w.source == "gps_track" or w.type == "map"
+        self.wp_label.setEnabled((is_digital or w.type == "analog") and not is_map)
+        self.wp_source.setEnabled(True)        # source combo always active
+        self.wp_type.setEnabled(not is_map)    # type locked when map is selected
+        self.wp_min.setEnabled(not is_digital and not is_map)
+        self.wp_max.setEnabled(not is_digital and not is_map)
+        self._wprops.setEnabled(True)
+
+    def _on_widget_edit_toggled(self, checked: bool):
+        pp = getattr(self, "_player_panel", None)
+        if pp is None:
+            return
+        pp.canvas.set_widget_edit(checked)
+        self.widget_edit_btn.setText("✎  Editing… (click to finish)" if checked
+                                     else "✎  Edit on canvas")
+        # Refresh once so widgets that need a current frame to compute their
+        # rect get a chance to render.
+        self._refresh_preview()
+
+    def _on_widget_list_selected(self, row: int):
+        pp = getattr(self, "_player_panel", None)
+        if pp is not None:
+            pp.canvas.set_widget_selected(row)
+        self._apply_widget_to_props(row)
+
+    def _on_widget_add(self):
+        # Default to a digital readout for whichever source has data right now,
+        # falling back to altitude. Keeps new widgets visible out of the box.
+        default_source = "altitude_m"
+        td = None
+        if self.srt_data and getattr(self, "_player_panel", None):
+            pct  = int(self._player_panel.timeline._position * _SL_MAX)
+            t_ms = (self._player_panel.controller.pct_to_video_time_ms(pct)
+                    + self.osd_offset_sb.value())
+            td = self.srt_data.get_data_at_time(t_ms)
+        if td is not None:
+            for key, _name, attr, *_ in WIDGET_DATA_SOURCES:
+                if attr and getattr(td, attr, None) is not None:
+                    default_source = key
+                    break
+        new_w = Widget(type="digital", source=default_source,
+                       x=0.5, y=0.10, w=0.18, h=0.06,
+                       style={"label": "", "color": "#FFFFFF"})
+        self._widgets.append(new_w)
+        self._refresh_widget_list()
+        # Select the new one
+        self.widget_list.setCurrentRow(len(self._widgets) - 1)
+        self._save_widget_settings()
+        self._refresh_preview()
+
+    def _on_widget_remove(self):
+        row = self.widget_list.currentRow()
+        if not (0 <= row < len(self._widgets)):
+            return
+        del self._widgets[row]
+        self._refresh_widget_list()
+        new_row = min(row, len(self._widgets) - 1)
+        self.widget_list.setCurrentRow(new_row)
+        self._save_widget_settings()
+        self._refresh_preview()
+
+    def _on_widget_prop_changed(self, *_):
+        row = self.widget_list.currentRow()
+        if not (0 <= row < len(self._widgets)):
+            return
+        w = self._widgets[row]
+        new_type   = self.wp_type.currentData() or "digital"
+        new_source = self.wp_source.currentData() or w.source
+        # Source drives map: selecting gps_track forces type=map; leaving it
+        # resets to digital so the type combo isn't left stuck on "map".
+        was_map    = w.source == "gps_track"
+        is_now_map = new_source == "gps_track"
+        if is_now_map:
+            new_type = "map"
+        elif was_map:
+            new_type = "digital"
+        type_changed     = new_type != w.type
+        source_changed   = new_source != w.source
+        switching_to_map = is_now_map and not was_map
+        w.type   = new_type
+        w.source = new_source
+        # Update style fields
+        label_text = self.wp_label.text().strip()
+        if label_text:
+            w.style["label"] = label_text
+        else:
+            w.style.pop("label", None)
+        color_text = self.wp_color.text().strip() or "#FFFFFF"
+        if not color_text.startswith("#"):
+            color_text = "#" + color_text
+        w.style["color"] = color_text
+        w.style["min"] = float(self.wp_min.value())
+        w.style["max"] = float(self.wp_max.value())
+        w.w = max(0.02, min(0.60, self.wp_w.value() / 100.0))
+        w.h = max(0.02, min(0.60, self.wp_h.value() / 100.0))
+        # Map widgets want a chunky square by default - a 6%-tall sliver looks
+        # nothing like a map. When switching INTO map from a small/flat
+        # readout, promote the size and sync the sliders so the UI reflects
+        # the new dims.
+        if switching_to_map and (w.w < 0.12 or w.h < 0.12):
+            w.w = 0.22
+            w.h = 0.22
+            self.wp_w.blockSignals(True); self.wp_h.blockSignals(True)
+            self.wp_w.setValue(int(round(w.w * 100)))
+            self.wp_h.setValue(int(round(w.h * 100)))
+            self.wp_w.blockSignals(False); self.wp_h.blockSignals(False)
+        # Refresh row label so the list reflects the new type/source
+        src_label = next((name for k, name, *_ in WIDGET_DATA_SOURCES
+                          if k == w.source), w.source)
+        self.widget_list.blockSignals(True)
+        self.widget_list.item(row).setText(f"{w.type} · {src_label}")
+        self.widget_list.blockSignals(False)
+        if type_changed or (source_changed and (is_now_map or was_map)):
+            # Toggle which property controls are relevant for the new type/source
+            self._apply_widget_to_props(row)
+        # Push the change to the canvas + repaint
+        pp = getattr(self, "_player_panel", None)
+        if pp is not None:
+            pp.canvas.set_widgets(self._widgets)
+        self._save_widget_settings()
+        self._refresh_preview()
+
+    def _on_widget_pick_color(self):
+        row = self.widget_list.currentRow()
+        if not (0 <= row < len(self._widgets)):
+            return
+        current = self.wp_color.text().strip() or "#FFFFFF"
+        col = QColorDialog.getColor(QColor(current), self, "Widget colour")
+        if col.isValid():
+            self.wp_color.setText(col.name().upper())
+            self._on_widget_prop_changed()
+
+    # Canvas-driven changes (drag) — keep model + UI in sync.
+
+    def _on_widget_canvas_selected(self, idx: int):
+        # The canvas already updated its own _widget_selected; mirror to the list.
+        if 0 <= idx < self.widget_list.count():
+            self.widget_list.blockSignals(True)
+            self.widget_list.setCurrentRow(idx)
+            self.widget_list.blockSignals(False)
+            self._apply_widget_to_props(idx)
+        elif idx == -1:
+            self.widget_list.blockSignals(True)
+            self.widget_list.clearSelection()
+            self.widget_list.blockSignals(False)
+            self._wprops.setEnabled(False)
+
+    def _on_widget_canvas_moved(self, idx: int, x: float, y: float, w: float, h: float):
+        # Continuous drag: cheap repaint only (canvas already updated its
+        # local copy). Skip full preview re-render for responsiveness.
+        if 0 <= idx < len(self._widgets):
+            self._widgets[idx].x = x
+            self._widgets[idx].y = y
+            self._widgets[idx].w = w
+            self._widgets[idx].h = h
+        # Live overlay re-render: cheap because it skips the video frame copy.
+        self._queue_preview()
+
+    def _on_widget_canvas_commit(self, idx: int, x: float, y: float, w: float, h: float):
+        # Drag end: persist + a full refresh for sharpness.
+        if 0 <= idx < len(self._widgets):
+            self._widgets[idx].x = x
+            self._widgets[idx].y = y
+            self._widgets[idx].w = w
+            self._widgets[idx].h = h
+            self._apply_widget_to_props(idx)
+        self._save_widget_settings()
+        self._refresh_preview()
+
     def _on_region_added(self, region: tuple):
         self._hide_regions.append(tuple(int(v) for v in region))
         self._update_hide_count_lbl()
@@ -2227,11 +2773,17 @@ class MainWindow(QMainWindow):
         """Composite OSD + SRT onto a video frame at given slider position."""
         ctrl = self._player_panel.controller
         t_ms     = ctrl.pct_to_video_time_ms(pct) + self.osd_offset_sb.value()
-        osd_frame = self.osd_data.frame_at_time(t_ms) if self.osd_data else None
+        raw_osd_frame = self.osd_data.frame_at_time(t_ms) if self.osd_data else None
+        # The "Show OSD glyphs" toggle hides the glyph render but widgets must
+        # still see the underlying frame to decode values.
+        osd_frame = raw_osd_frame if self.osd_show_check.isChecked() else None
+        td = self.srt_data.get_data_at_time(t_ms) if self.srt_data else None
+        tframe = TelemetryFrame(td, raw_osd_frame, firmware=self._current_firmware,
+                                osd_font=self.font_obj, srt_file=self.srt_data,
+                                osd_file=self.osd_data)
         srt_text = ""
-        if self.srt_data and self.srt_bar_check.isChecked():
-            td = self.srt_data.get_data_at_time(t_ms)
-            if td: srt_text = td.status_line(self.srt_fields_combo.checked_keys())
+        if td and self.srt_bar_check.isChecked():
+            srt_text = td.status_line(self.srt_fields_combo.checked_keys())
         # Aspect padding: wrap source frame in black canvas before compositing.
         # Pad rect is computed from the INPUT frame's actual size, since
         # playback / scrub frames are decoded at scaled-down dims, not native.
@@ -2270,12 +2822,14 @@ class MainWindow(QMainWindow):
             hide_regions = self._active_hide_regions(),
             source_w     = src_w,
             source_h     = src_h,
+            widgets      = self._widgets,
         )
         gc = self.osd_data.grid_cols if self.osd_data else GRID_COLS
         gr = self.osd_data.grid_rows if self.osd_data else GRID_ROWS
         if self.font_obj and PIL_OK:
-            return render_osd_frame(img, osd_frame, self.font_obj, cfg, gc, gr)
-        return render_fallback(img, osd_frame, cfg, gc, gr)
+            return render_osd_frame(img, osd_frame, self.font_obj, cfg, gc, gr,
+                                    telemetry=tframe)
+        return render_fallback(img, osd_frame, cfg, gc, gr, telemetry=tframe)
 
     def _render_osd_overlay(self, pct, w, h):
         """Render OSD + SRT as transparent overlay at display size (w, h).
@@ -2284,11 +2838,15 @@ class MainWindow(QMainWindow):
         skipping the expensive video frame copy and resize.
         """
         t_ms = self._player_panel.controller.pct_to_video_time_ms(pct) + self.osd_offset_sb.value()
-        osd_frame = self.osd_data.frame_at_time(t_ms) if self.osd_data else None
+        raw_osd_frame = self.osd_data.frame_at_time(t_ms) if self.osd_data else None
+        osd_frame = raw_osd_frame if self.osd_show_check.isChecked() else None
+        td = self.srt_data.get_data_at_time(t_ms) if self.srt_data else None
+        tframe = TelemetryFrame(td, raw_osd_frame, firmware=self._current_firmware,
+                                osd_font=self.font_obj, srt_file=self.srt_data,
+                                osd_file=self.osd_data)
         srt_text = ""
-        if self.srt_data and self.srt_bar_check.isChecked():
-            td = self.srt_data.get_data_at_time(t_ms)
-            if td: srt_text = td.status_line(self.srt_fields_combo.checked_keys())
+        if td and self.srt_bar_check.isChecked():
+            srt_text = td.status_line(self.srt_fields_combo.checked_keys())
         # Scale pixel offsets from canvas (incl. bars) to display resolution
         ctrl = self._player_panel.controller
         cw, ch, _sx, _sy = self._current_canvas_dims()
@@ -2312,13 +2870,15 @@ class MainWindow(QMainWindow):
             hide_regions = self._active_hide_regions(),
             source_w     = display_src_w,
             source_h     = display_src_h,
+            widgets      = self._widgets,
         )
         canvas = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
         gc = self.osd_data.grid_cols if self.osd_data else GRID_COLS
         gr = self.osd_data.grid_rows if self.osd_data else GRID_ROWS
         if self.font_obj and PIL_OK:
-            return render_osd_frame(canvas, osd_frame, self.font_obj, cfg, gc, gr)
-        return render_fallback(canvas, osd_frame, cfg, gc, gr)
+            return render_osd_frame(canvas, osd_frame, self.font_obj, cfg, gc, gr,
+                                    telemetry=tframe)
+        return render_fallback(canvas, osd_frame, cfg, gc, gr, telemetry=tframe)
 
     def _on_osd_offset_changed(self, value: int):
         global _OSD_OFFSET_MS
@@ -2931,6 +3491,9 @@ class MainWindow(QMainWindow):
             color_config = self._get_color_config() if self.cc_enable.isChecked() and not self.transparent_check.isChecked() else None,
             transparent_export = self.transparent_check.isChecked(),
             target_aspect = self._current_target_aspect(),
+            widgets       = list(self._widgets),
+            show_osd_grid = self.osd_show_check.isChecked(),
+            firmware      = self._current_firmware,
         )
 
         self.render_btn.setEnabled(False)
@@ -3001,6 +3564,213 @@ class MainWindow(QMainWindow):
 
     def _st(self, msg):
         self.status.setText(msg)
+
+    # ─── Auto-updater ───────────────────────────────────────────────────────
+    #
+    # Startup pings the GitHub Releases API on a background thread. If a
+    # newer version exists and the user hasn't explicitly skipped it,
+    # a modal dialog offers Update / Skip / Remind me later. Update streams
+    # the release source zipball over the install dir and re-launches.
+
+    def _start_update_check(self):
+        if getattr(self, "_update_thread", None) is not None:
+            return  # already running
+        self._update_thread = _UpdateCheckWorker(VERSION)
+        self._update_thread.finished_with_result.connect(
+            self._on_update_check_done)
+        self._update_thread.finished.connect(self._update_thread.deleteLater)
+        self._update_thread.start()
+
+    def _on_update_check_done(self, info):
+        self._update_thread = None
+        if info is None:
+            return  # no update / network failure - silent
+        skipped = self._get_skipped_update_version()
+        if skipped == info.tag:
+            return
+        self._show_update_dialog(info)
+
+    def _get_skipped_update_version(self) -> str:
+        try:
+            with open(_SETTINGS_FILE) as f:
+                return str(json.load(f).get("updater_skip_version", "") or "")
+        except Exception:
+            return ""
+
+    def _show_update_dialog(self, info):
+        install_dir = os.path.dirname(os.path.abspath(__file__))
+        is_git = updater.install_dir_is_git_checkout(install_dir)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("VueOSD update available")
+        dlg.resize(560, 480)
+        vl = QVBoxLayout(dlg)
+
+        header = QLabel(
+            f"<b>{info.name}</b><br>"
+            f"You're on <b>v{VERSION}</b> — "
+            f"<b>{info.tag}</b> is available on GitHub."
+        )
+        header.setTextFormat(Qt.TextFormat.RichText)
+        header.setWordWrap(True)
+        vl.addWidget(header)
+
+        if is_git:
+            warn = QLabel(
+                "⚠ This install is a git working copy. Updating will "
+                "overwrite tracked files, which will show up in <code>git "
+                "status</code>. Commit or stash first if that matters."
+            )
+            warn.setTextFormat(Qt.TextFormat.RichText)
+            warn.setWordWrap(True)
+            warn.setStyleSheet(
+                f"color:{_T()['orange']};padding:6px;"
+                f"border:1px solid {_T()['orange']};border-radius:4px;"
+            )
+            vl.addWidget(warn)
+
+        notes_lbl = QLabel("Release notes:")
+        vl.addWidget(notes_lbl)
+        from PyQt6.QtWidgets import QTextBrowser
+        notes = QTextBrowser()
+        notes.setOpenExternalLinks(True)
+        if info.body:
+            notes.setMarkdown(info.body)
+        else:
+            notes.setPlainText("(no release notes)")
+        vl.addWidget(notes, 1)
+
+        btn_row = QHBoxLayout()
+        later_btn = QPushButton("Remind me later")
+        later_btn.setStyleSheet(BTN_SEC)
+        later_btn.setToolTip("Ask again next launch.")
+        skip_btn = QPushButton(f"Skip {info.tag}")
+        skip_btn.setStyleSheet(BTN_SEC)
+        skip_btn.setToolTip("Don't ask about this version again.")
+        update_btn = QPushButton("Update now")
+        update_btn.setStyleSheet(BTN_PRIMARY)
+        update_btn.setDefault(True)
+        btn_row.addStretch()
+        btn_row.addWidget(later_btn)
+        btn_row.addWidget(skip_btn)
+        btn_row.addWidget(update_btn)
+        vl.addLayout(btn_row)
+
+        # The dialog returns 0 (later), 1 (skip), or 2 (update) via done().
+        later_btn.clicked.connect(lambda: dlg.done(0))
+        skip_btn.clicked.connect(lambda: dlg.done(1))
+        update_btn.clicked.connect(lambda: dlg.done(2))
+
+        choice = dlg.exec()
+        if choice == 1:
+            _save_settings(updater_skip_version=info.tag)
+        elif choice == 2:
+            self._run_update(info)
+        # choice 0 (later) -> do nothing
+
+    def _on_download_fonts(self):
+        """Fetch the bundled font pack from GitHub releases and refresh the
+        font picker. Lookup + download happens off the GUI thread; this
+        method just orchestrates the modal progress UI."""
+        install_dir = os.path.dirname(os.path.abspath(__file__))
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Downloading fonts")
+        dlg.resize(380, 110)
+        dlg.setModal(True)
+        dlg.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        vl = QVBoxLayout(dlg)
+        status_lbl = QLabel("Starting…")
+        status_lbl.setWordWrap(True)
+        vl.addWidget(status_lbl)
+        prog = QProgressBar()
+        prog.setRange(0, 100)
+        vl.addWidget(prog)
+
+        worker = _FontsDownloadWorker(install_dir)
+
+        def on_progress(pct, msg):
+            prog.setValue(pct)
+            status_lbl.setText(msg)
+
+        def on_done(err, n_fonts):
+            dlg.accept()
+            if err:
+                QMessageBox.critical(self, "Font download failed", err)
+                return
+            # Refresh the font picker so newly installed fonts show up.
+            try:
+                if hasattr(self, "_on_fw_changed") and self._current_firmware:
+                    self._on_fw_changed(self._current_firmware)
+            except Exception:
+                pass
+            QMessageBox.information(
+                self, "Fonts installed",
+                f"{n_fonts} fonts are now available in the Style picker.")
+
+        worker.progress.connect(on_progress)
+        worker.done.connect(on_done)
+        worker.finished.connect(worker.deleteLater)
+        # Keep a ref so GC doesn't reap mid-download.
+        self._fonts_worker = worker
+        worker.start()
+        dlg.exec()
+
+    def _run_update(self, info):
+        install_dir = os.path.dirname(os.path.abspath(__file__))
+        prog = QProgressBar()
+        prog.setRange(0, 100)
+        prog.setValue(0)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Updating VueOSD")
+        dlg.resize(380, 110)
+        dlg.setModal(True)
+        # Don't let the user dismiss mid-install via the close button.
+        dlg.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        vl = QVBoxLayout(dlg)
+        status_lbl = QLabel("Starting…")
+        status_lbl.setWordWrap(True)
+        vl.addWidget(status_lbl)
+        vl.addWidget(prog)
+
+        worker = _UpdateInstallWorker(info, install_dir)
+
+        def on_progress(pct, msg):
+            prog.setValue(pct)
+            status_lbl.setText(msg)
+
+        def on_done(err):
+            dlg.accept()
+            if err:
+                QMessageBox.critical(self, "Update failed", err)
+                return
+            # Persist any pending state before restart.
+            try:
+                _save_settings()
+            except Exception:
+                pass
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setWindowTitle("Update installed")
+            box.setText(
+                f"VueOSD {info.tag} installed.\n\n"
+                "Restart now to load the new version?"
+            )
+            box.setStandardButtons(
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            box.setDefaultButton(QMessageBox.StandardButton.Yes)
+            if box.exec() == QMessageBox.StandardButton.Yes:
+                updater.restart_app()  # spawns new process, sys.exits
+
+        worker.progress.connect(on_progress)
+        worker.done.connect(on_done)
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+        # Keep a ref so the worker doesn't get GC'd while running.
+        self._install_worker = worker
+        dlg.exec()
 
 
 # ─── Styles (Catppuccin Mocha) ────────────────────────────────────────────────

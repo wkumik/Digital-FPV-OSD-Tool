@@ -48,6 +48,7 @@ from subprocess_utils import _hidden_popen, _hidden_run
 from osd_renderer import OsdRenderer, OsdRenderConfig, _draw_srt_bar
 from osd_parser   import parse_osd, GRID_COLS, GRID_ROWS
 from srt_parser   import parse_srt
+from widgets      import TelemetryFrame
 from font_loader  import load_font
 
 
@@ -263,6 +264,10 @@ class ProcessingConfig:
     color_config: Optional[ColorTransConfig] = None  # Color correction settings
     transparent_export: bool = False  # Chroma-key export (OSD on magenta, .mp4)
     target_aspect: str = ""           # "" = source | "16:9" | "4:3" | "21:9" | "1:1" | "9:16"
+    widgets:      list = None         # List of widgets.Widget instances to overlay
+    show_osd_grid: bool = True        # When False, MSP glyph grid is suppressed
+                                      # (widgets + SRT bar still render).
+    firmware:     str  = "INAV"       # FC type for OSD glyph decoding
 
 
 # ── GPU encoder detection ─────────────────────────────────────────────────────
@@ -840,6 +845,7 @@ def _overlay_pipeline(
         hide_regions = list(config.hide_regions or []),
         source_w    = src_w,
         source_h    = src_h,
+        widgets     = list(config.widgets or []),
     )
     gcols = osd_data.grid_cols if osd_data else GRID_COLS
     grows = osd_data.grid_rows if osd_data else GRID_ROWS
@@ -982,6 +988,7 @@ def _overlay_pipeline(
             if progress_callback:
                 progress_callback(50, f"No OSD in trim window — blank overlay  [{enc_label}]")
         else:
+            has_widgets = bool(render_cfg.widgets)
             for i in range(n_out_frames):
                 # Absolute timestamp of this video frame in the OSD file's timebase.
                 # use_pts: real PTS from ffprobe (handles gaps/dropped packets).
@@ -989,21 +996,33 @@ def _overlay_pipeline(
                 t_sec    = pts_list[i] if use_pts else i / fps
                 abs_t_ms = int((_t_start + t_sec) * 1000 + config.osd_offset_ms)
 
-                osd_frame = osd_data.frame_at_time(abs_t_ms)
+                raw_osd_frame = osd_data.frame_at_time(abs_t_ms)
+                osd_frame = raw_osd_frame if config.show_osd_grid else None
 
+                td = srt_data.get_data_at_time(abs_t_ms) if srt_data else None
                 srt_text = ""
-                if srt_data and config.show_srt_bar:
-                    td = srt_data.get_data_at_time(abs_t_ms)
-                    if td:
-                        srt_text = td.status_line(config.srt_enabled_fields)
+                if td and config.show_srt_bar:
+                    srt_text = td.status_line(config.srt_enabled_fields)
 
-                cache_key = (osd_frame.index if osd_frame else -1, srt_text)
+                tframe = TelemetryFrame(td, raw_osd_frame, firmware=config.firmware,
+                                        osd_font=font, srt_file=srt_data,
+                                        osd_file=osd_data) \
+                    if has_widgets else None
+
+                # Cache key includes both SRT identity and OSD frame index so
+                # widgets can't reuse stale renders across changing telemetry.
+                if has_widgets:
+                    osd_key = raw_osd_frame.index if raw_osd_frame else -1
+                    widget_key = (id(td) if td is not None else 0, osd_key)
+                else:
+                    widget_key = 0
+                cache_key  = (osd_frame.index if osd_frame else -1, srt_text, widget_key)
                 if cache_key not in _frame_cache:
                     if len(_frame_cache) >= _CACHE_MAX:
                         # Drop the oldest entry (insertion-order dict, Python 3.7+)
                         del _frame_cache[next(iter(_frame_cache))]
                     _frame_cache[cache_key] = bytes(
-                        renderer.composite(osd_frame, srt_text))
+                        renderer.composite(osd_frame, srt_text, telemetry=tframe))
 
                 ffmpeg_proc.stdin.write(_frame_cache[cache_key])
 
@@ -1100,6 +1119,7 @@ def _chroma_key_pipeline(
         hide_regions = list(config.hide_regions or []),
         source_w    = src_w,
         source_h    = src_h,
+        widgets     = list(config.widgets or []),
     )
     gcols = osd_data.grid_cols if osd_data else GRID_COLS
     grows = osd_data.grid_rows if osd_data else GRID_ROWS
@@ -1189,26 +1209,37 @@ def _chroma_key_pipeline(
             # Nothing to render — single solid magenta frame
             ffmpeg_proc.stdin.write(_flatten(renderer.composite(None, "")))
         else:
+            has_widgets = bool(render_cfg.widgets)
             for i in range(n_out_frames):
                 t_sec    = pts_list[i] if use_pts else i / fps
                 abs_t_ms = int((_t_start + t_sec) * 1000 + config.osd_offset_ms)
 
-                osd_frame = None
+                raw_osd_frame = None
                 if osd_data and osd_in_window:
-                    osd_frame = osd_data.frame_at_time(abs_t_ms)
+                    raw_osd_frame = osd_data.frame_at_time(abs_t_ms)
+                osd_frame = raw_osd_frame if config.show_osd_grid else None
 
+                td = srt_data.get_data_at_time(abs_t_ms) if srt_data else None
                 srt_text = ""
-                if srt_data and config.show_srt_bar:
-                    td = srt_data.get_data_at_time(abs_t_ms)
-                    if td:
-                        srt_text = td.status_line(config.srt_enabled_fields)
+                if td and config.show_srt_bar:
+                    srt_text = td.status_line(config.srt_enabled_fields)
 
-                cache_key = (osd_frame.index if osd_frame else -1, srt_text)
+                tframe = TelemetryFrame(td, raw_osd_frame, firmware=config.firmware,
+                                        osd_font=font, srt_file=srt_data,
+                                        osd_file=osd_data) \
+                    if has_widgets else None
+
+                if has_widgets:
+                    osd_key = raw_osd_frame.index if raw_osd_frame else -1
+                    widget_key = (id(td) if td is not None else 0, osd_key)
+                else:
+                    widget_key = 0
+                cache_key  = (osd_frame.index if osd_frame else -1, srt_text, widget_key)
                 if cache_key not in _frame_cache:
                     if len(_frame_cache) >= _CACHE_MAX:
                         del _frame_cache[next(iter(_frame_cache))]
                     _frame_cache[cache_key] = _flatten(
-                        renderer.composite(osd_frame, srt_text))
+                        renderer.composite(osd_frame, srt_text, telemetry=tframe))
 
                 ffmpeg_proc.stdin.write(_frame_cache[cache_key])
 

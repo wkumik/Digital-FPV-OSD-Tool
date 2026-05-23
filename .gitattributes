@@ -1,0 +1,10 @@
+# export-ignore: keep these in the git repo but DROP them from `git archive`
+# output. GitHub's source zipball + the in-app auto-updater both use
+# git-archive-style export under the hood, so this trims the release
+# download (was ~45 MB, mostly fonts/) without disturbing local clones.
+#
+# Users who fetch the slim release get fonts via the "Download fonts"
+# button in the Font panel (see updater.py find_fonts_asset).
+fonts/         export-ignore
+.claude/       export-ignore
+.gitattributes export-ignore
