@@ -40,7 +40,7 @@ from _widget_map import _draw_map, invalidate_track_caches  # noqa: F401 (re-exp
 
 
 OSD_WIDGET_MAX_GAP_MS = 1500
-OSD_WIDGET_DOWNSAMPLE_HZ_AT_300 = 5.0
+OSD_WIDGET_FILTER_WARMUP_MS = 3000
 
 
 # ----- Widget model ----------------------------------------------------------
@@ -189,27 +189,24 @@ class TelemetryFrame:
     def get_osd_visual_value(self, key: str, smoothness: float) -> Optional[float]:
         """Return the visual-only OSD value for moving widgets.
 
-        The regular widget text still uses get_osd_value(). Above 100% this
-        evaluates a slower virtual OSD stream, then interpolates inside that
-        stream so fast-refresh, quantized OSD values behave more like the
-        user's successful 2 Hz test file without changing displayed numbers.
+        0% is deliberately identical to stock v1.7: use the current OSD frame
+        value with no interpolation/filtering. Above 0%, the regular widget
+        text still uses get_osd_value(), while geometry uses an alpha-beta
+        filter evaluated with enough lookahead to compensate its estimated lag.
         """
         if self.osd_file is None or self.osd_time_ms is None:
             return self.get_osd_value(key)
         smoothness = max(0.0, float(smoothness))
+        if smoothness <= 0.0:
+            return self.get_osd_value(key)
         cache_key = (key, round(smoothness, 3))
         if cache_key in self._visual_cache:
             return self._visual_cache[cache_key]
-        if smoothness <= 1.0:
-            value = self._interpolated_osd_value(key, self.osd_time_ms,
-                                                 smoothness=smoothness)
-        else:
-            value = self._downsampled_visual_value(key, smoothness)
+        value = self._alpha_beta_visual_value(key, smoothness)
         self._visual_cache[cache_key] = value
         return value
 
-    def _interpolated_osd_value(self, key: str, time_ms: int,
-                                smoothness: float = 1.0) -> Optional[float]:
+    def _interpolated_osd_value(self, key: str, time_ms: int) -> Optional[float]:
         frames = getattr(self.osd_file, "frames", None)
         timestamps = getattr(self.osd_file, "timestamps", None)
         if not frames or not timestamps:
@@ -229,25 +226,78 @@ class TelemetryFrame:
         if prev_v is None or next_v is None:
             return None
         alpha = max(0.0, min(1.0, (time_ms - prev.time_ms) / gap))
-        shaped = alpha * alpha * (3.0 - 2.0 * alpha)
-        blend = min(1.0, max(0.0, smoothness))
-        alpha = alpha + (shaped - alpha) * blend
         return prev_v + (next_v - prev_v) * alpha
 
-    def _downsampled_visual_value(self, key: str, smoothness: float) -> Optional[float]:
-        t = int(self.osd_time_ms)
-        over = min(1.0, max(0.0, smoothness - 1.0) / 2.0)
-        max_interval = int(round(1000.0 / OSD_WIDGET_DOWNSAMPLE_HZ_AT_300))
-        interval_ms = max(1, int(round(1 + (max_interval - 1) * over)))
-        bucket0 = (t // interval_ms) * interval_ms
-        bucket1 = bucket0 + interval_ms
-        v0 = self._interpolated_osd_value(key, bucket0, smoothness=1.0)
-        v1 = self._interpolated_osd_value(key, bucket1, smoothness=1.0)
-        if v0 is None or v1 is None:
+    @staticmethod
+    def _alpha_beta_params(smoothness: float) -> tuple[float, float]:
+        s = max(0.0, float(smoothness))
+        alpha = 1.0 / (1.0 + 1.35 * s)
+        beta = alpha * alpha * 0.55
+        return max(0.03, min(0.95, alpha)), max(0.002, min(0.45, beta))
+
+    @classmethod
+    def _lookahead_ms(cls, smoothness: float, sample_ms: float) -> int:
+        if smoothness <= 0.0 or sample_ms <= 0.0:
+            return 0
+        alpha, _beta = cls._alpha_beta_params(smoothness)
+        estimated_delay = sample_ms * (1.0 - alpha) / alpha
+        return int(max(0, min(OSD_WIDGET_MAX_GAP_MS, round(estimated_delay))))
+
+    def _alpha_beta_visual_value(self, key: str, smoothness: float) -> Optional[float]:
+        frames = getattr(self.osd_file, "frames", None)
+        timestamps = getattr(self.osd_file, "timestamps", None)
+        if not frames or not timestamps:
             return None
-        alpha = (t - bucket0) / max(1, bucket1 - bucket0)
-        alpha = alpha * alpha * (3.0 - 2.0 * alpha)
-        return v0 + (v1 - v0) * alpha
+        sample_ms = self._median_sample_ms(timestamps)
+        lookahead_ms = self._lookahead_ms(smoothness, sample_ms)
+        target_time = min(int(self.osd_time_ms) + lookahead_ms, timestamps[-1])
+        start_time = max(timestamps[0], target_time - OSD_WIDGET_FILTER_WARMUP_MS)
+        start_idx = max(0, bisect.bisect_left(timestamps, start_time) - 1)
+        end_idx = min(len(frames) - 1, bisect.bisect_right(timestamps, target_time))
+        alpha_gain, beta_gain = self._alpha_beta_params(smoothness)
+
+        x = None
+        velocity = 0.0
+        last_t = None
+        for idx in range(start_idx, end_idx + 1):
+            frame = frames[idx]
+            if frame.time_ms > target_time:
+                break
+            measurement = _osd_extract(frame, key, self._fw, slim_map=self._slim_map)
+            if measurement is None:
+                continue
+            t = frame.time_ms
+            if x is None:
+                x = measurement
+                last_t = t
+                continue
+            dt_s = max(0.001, (t - last_t) / 1000.0)
+            x_pred = x + velocity * dt_s
+            residual = measurement - x_pred
+            x = x_pred + alpha_gain * residual
+            velocity = velocity + beta_gain * residual / dt_s
+            last_t = t
+
+        if x is None:
+            return None
+        if last_t is not None and target_time > last_t:
+            x += velocity * ((target_time - last_t) / 1000.0)
+        return x
+
+    @staticmethod
+    def _median_sample_ms(timestamps) -> float:
+        if len(timestamps) < 2:
+            return 100.0
+        end = min(len(timestamps), 48)
+        gaps = [
+            timestamps[i] - timestamps[i - 1]
+            for i in range(1, end)
+            if timestamps[i] > timestamps[i - 1]
+        ]
+        if not gaps:
+            return 100.0
+        gaps.sort()
+        return float(gaps[len(gaps) // 2])
 
 
 class _VisualWidgetValue:

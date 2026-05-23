@@ -1158,11 +1158,11 @@ class MainWindow(QMainWindow):
         self.wp_smoothness.setRange(0, 300)
         self.wp_smoothness.setValue(70)
         self.wp_smoothness.setToolTip(
-            "Visual smoothing for bars and gauges. Above 100%, widget motion uses a slower virtual OSD sample rate; 300% is 5 Hz.")
+            "Visual alpha-beta smoothing for bars and gauges. 0% disables smoothing completely; values above 300% can be typed for testing.")
         self.wp_smoothness.valueChanged.connect(self._on_widget_prop_changed)
         wp.addWidget(self.wp_smoothness, row, 1)
         self.wp_smoothness_spin = QSpinBox()
-        self.wp_smoothness_spin.setRange(0, 300)
+        self.wp_smoothness_spin.setRange(0, 2147483647)
         self.wp_smoothness_spin.setValue(70)
         self.wp_smoothness_spin.setSuffix("%")
         self.wp_smoothness_spin.setToolTip(self.wp_smoothness.toolTip())
@@ -2594,8 +2594,8 @@ class MainWindow(QMainWindow):
             # Size
             self.wp_w.setValue(max(2, min(60, int(round(w.w * 100)))))
             self.wp_h.setValue(max(2, min(60, int(round(w.h * 100)))))
-            smooth_pct = max(0, min(300, int(round(float(w.style.get("smoothness", 0.7)) * 100))))
-            self.wp_smoothness.setValue(smooth_pct)
+            smooth_pct = max(0, int(round(float(w.style.get("smoothness", 0.7)) * 100)))
+            self.wp_smoothness.setValue(min(300, smooth_pct))
             self.wp_smoothness_spin.setValue(smooth_pct)
         finally:
             for c in controls:
@@ -2709,7 +2709,7 @@ class MainWindow(QMainWindow):
             self.wp_smoothness_spin.blockSignals(False)
         elif self.sender() is self.wp_smoothness_spin:
             self.wp_smoothness.blockSignals(True)
-            self.wp_smoothness.setValue(smooth_pct)
+            self.wp_smoothness.setValue(min(300, smooth_pct))
             self.wp_smoothness.blockSignals(False)
         w.style["smoothness"] = max(0.0, smooth_pct / 100.0)
         w.w = max(0.02, min(0.60, self.wp_w.value() / 100.0))

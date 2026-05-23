@@ -18,7 +18,7 @@ class WidgetSmoothingTest(unittest.TestCase):
 
         self.assertEqual(extract_value(frame, "osd_speed_kmh", "ArduPilot"), 42)
 
-    def test_widget_visual_downsamples_above_100_percent(self):
+    def test_zero_percent_uses_unsmoothed_current_frame_value(self):
         osd = OsdFile(
             frames=[
                 speed_frame(0, 0, "0"),
@@ -36,11 +36,28 @@ class WidgetSmoothingTest(unittest.TestCase):
             osd_time_ms=50,
         )
 
-        self.assertEqual(telemetry.get_osd_visual_value("osd_speed_kmh", 0.0), 50.0)
-        self.assertAlmostEqual(
-            telemetry.get_osd_visual_value("osd_speed_kmh", 3.0),
-            31.25,
+        self.assertEqual(telemetry.get_osd_visual_value("osd_speed_kmh", 0.0), 0.0)
+
+    def test_alpha_beta_smoothing_uses_lookahead(self):
+        osd = OsdFile(
+            frames=[
+                speed_frame(0, 0, "0"),
+                speed_frame(1, 100, "100"),
+                speed_frame(2, 200, "200"),
+            ],
+            timestamps=[0, 100, 200],
+            grid_cols=5,
+            grid_rows=1,
         )
+        telemetry = TelemetryFrame(
+            osd_frame=osd.frames[0],
+            firmware="ArduPilot",
+            osd_file=osd,
+            osd_time_ms=50,
+        )
+
+        self.assertEqual(telemetry._lookahead_ms(3.0, 100.0), 405)
+        self.assertGreater(telemetry.get_osd_visual_value("osd_speed_kmh", 3.0), 50.0)
 
     def test_widget_visual_value_keeps_text_value_exact(self):
         osd = OsdFile(
@@ -67,7 +84,7 @@ class WidgetSmoothingTest(unittest.TestCase):
 
         value, _unit, fmt = _get_widget_value(telemetry, widget)
 
-        self.assertAlmostEqual(float(value), 31.25)
+        self.assertGreater(float(value), 50.0)
         self.assertEqual(_format_value(value, fmt, fmt), "0")
 
 
