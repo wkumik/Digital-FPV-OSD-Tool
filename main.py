@@ -2197,12 +2197,13 @@ class MainWindow(QMainWindow):
         self._cc_save_btn.setStyleSheet(BTN_SEC)
         self._cc_rst_btn.setStyleSheet(BTN_SEC)
         self._cc_rgb_btn.setStyleSheet(BTN_SEC)
-        # Custom Widgets + Hide-regions buttons (constructed with BTN_SEC, so
-        # they need re-styling on theme switch or they keep the old palette in
-        # light mode). Includes the checkable "Edit on canvas" / hide toggles.
+        # Buttons constructed with BTN_SEC that the per-name restyling above
+        # misses, so they'd keep the old palette in light mode. Includes the
+        # checkable "Edit on canvas" / hide toggles and the font downloader.
         for _b in (self.widget_add_btn, self.widget_remove_btn,
                    self.widget_diag_btn, self.wp_color_btn, self.widget_edit_btn,
-                   self.hide_add_btn, self.hide_remove_btn, self.hide_clear_btn):
+                   self.hide_add_btn, self.hide_remove_btn, self.hide_clear_btn,
+                   self._download_fonts_btn):
             _b.setStyleSheet(BTN_SEC)
         # Gauge list (styled with theme tokens only at construction).
         self.widget_list.setStyleSheet(
