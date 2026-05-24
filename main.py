@@ -525,6 +525,68 @@ class CheckableComboBox(QComboBox):
         painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, opt)
 
 
+class CollapsibleGroupBox(QGroupBox):
+    """A QGroupBox whose title bar collapses/expands its contents on click.
+
+    Stays a real QGroupBox so GROUP_STYLE, the theme-restyle pass, and the
+    usual "add widgets to its layout" pattern all keep working unchanged — only
+    the class name at the call site differs. Click the title (the ▾/▸ arrow
+    marks the state); content is simply hidden so the box shrinks to its title.
+    """
+    def __init__(self, title: str = "", parent=None):
+        super().__init__(parent)
+        self._title_text = title
+        self._expanded = True
+        self._sync_title()
+
+    def _sync_title(self):
+        super().setTitle(f"{'▾' if self._expanded else '▸'}  {self._title_text}")
+
+    def setTitle(self, title: str):
+        self._title_text = title
+        self._sync_title()
+
+    def titleText(self) -> str:
+        return self._title_text
+
+    def isExpanded(self) -> bool:
+        return self._expanded
+
+    def setExpanded(self, expanded: bool):
+        if expanded == self._expanded:
+            return
+        self._expanded = expanded
+        self._sync_title()
+        for child in self.findChildren(
+                QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            child.setVisible(expanded)
+        self.updateGeometry()
+
+    def _label_rect(self):
+        """Vertical extent of the title label, for hit-testing the header."""
+        try:
+            from PyQt6.QtWidgets import QStyle, QStyleOptionGroupBox
+            opt = QStyleOptionGroupBox()
+            self.initStyleOption(opt)
+            return self.style().subControlRect(
+                QStyle.ComplexControl.CC_GroupBox, opt,
+                QStyle.SubControl.SC_GroupBoxLabel, self)
+        except Exception:
+            return None
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            y = ev.position().toPoint().y()
+            lr = self._label_rect()
+            in_header = (lr.top() <= y <= lr.bottom()) if lr is not None \
+                else (y <= self.fontMetrics().height() + 6)
+            if in_header:
+                self.setExpanded(not self._expanded)
+                ev.accept()
+                return
+        super().mousePressEvent(ev)
+
+
 class InfoCard(QGroupBox):
     def __init__(self, title, parent=None):
         super().__init__(title, parent)
@@ -884,7 +946,7 @@ class MainWindow(QMainWindow):
         ll.addLayout(hdr_row)
 
         # ── Files group ───────────────────────────────────────────────────────
-        fg = QGroupBox("Files")
+        fg = CollapsibleGroupBox("Files")
         fg.setStyleSheet(GROUP_STYLE)
         fgl = QVBoxLayout(fg)
         fgl.setSpacing(4)
@@ -913,7 +975,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(fg)
 
         # ── OSD Font group ────────────────────────────────────────────────────
-        fontg = QGroupBox("OSD Font")
+        fontg = CollapsibleGroupBox("OSD Font")
         fontg.setStyleSheet(GROUP_STYLE)
         fontgl = QVBoxLayout(fontg)
         fontgl.setSpacing(6)
@@ -966,7 +1028,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(fontg)
 
         # ── Link Status Bar ───────────────────────────────────────────────────
-        srtg = QGroupBox("Link Status Bar")
+        srtg = CollapsibleGroupBox("Link Status Bar")
         srtg.setStyleSheet(GROUP_STYLE)
         srtgl = QVBoxLayout(srtg)
         srtgl.setSpacing(4)
@@ -1018,7 +1080,7 @@ class MainWindow(QMainWindow):
         properties section for the currently selected widget.
         """
         t = _T()
-        wg = QGroupBox("Custom Widgets")
+        wg = CollapsibleGroupBox("Custom Widgets")
         wg.setStyleSheet(GROUP_STYLE)
         wgl = QVBoxLayout(wg)
         wgl.setSpacing(4)
@@ -1144,6 +1206,13 @@ class MainWindow(QMainWindow):
         self.wp_max.setDecimals(2)
         self.wp_max.setValue(100.0)
         self.wp_max.valueChanged.connect(self._on_widget_prop_changed)
+        _dsb_ss = (
+            f"QDoubleSpinBox{{background:{_T()['surface']};color:{_T()['text']};"
+            f"border:1px solid {_T()['border2']};border-radius:4px;padding:3px 6px;}}"
+            f"QDoubleSpinBox::up-button,QDoubleSpinBox::down-button{{width:16px;"
+            f"background:{_T()['surface2']};border-radius:2px;}}")
+        self.wp_min.setStyleSheet(_dsb_ss)
+        self.wp_max.setStyleSheet(_dsb_ss)
         mm_row.addWidget(self.wp_min)
         mm_row.addWidget(self.wp_max)
         mm_w = QWidget()
@@ -1180,6 +1249,11 @@ class MainWindow(QMainWindow):
         self.wp_smoothness_spin.setValue(70)
         self.wp_smoothness_spin.setSuffix("%")
         self.wp_smoothness_spin.setToolTip(self.wp_smoothness.toolTip())
+        self.wp_smoothness_spin.setStyleSheet(
+            f"QSpinBox{{background:{_T()['surface']};color:{_T()['text']};"
+            f"border:1px solid {_T()['border2']};border-radius:4px;padding:3px 6px;}}"
+            f"QSpinBox::up-button,QSpinBox::down-button{{width:16px;"
+            f"background:{_T()['surface2']};border-radius:2px;}}")
         self.wp_smoothness_spin.valueChanged.connect(self._on_widget_prop_changed)
         wp.addWidget(self.wp_smoothness_spin, row, 2)
         row += 1
@@ -2123,6 +2197,11 @@ class MainWindow(QMainWindow):
         self._cc_save_btn.setStyleSheet(BTN_SEC)
         self._cc_rst_btn.setStyleSheet(BTN_SEC)
         self._cc_rgb_btn.setStyleSheet(BTN_SEC)
+        # Custom Widgets panel buttons (constructed with BTN_SEC, so they need
+        # re-styling on theme switch or they keep the old palette in light mode).
+        for _b in (self.widget_add_btn, self.widget_remove_btn,
+                   self.widget_diag_btn, self.wp_color_btn):
+            _b.setStyleSheet(BTN_SEC)
 
         # SpinBoxes
         _sb_style = (
@@ -2133,6 +2212,11 @@ class MainWindow(QMainWindow):
         )
         self.mbps_spin.setStyleSheet(_sb_style)
         self.osd_offset_sb.setStyleSheet(_sb_style)
+        # Widget-panel spinboxes — match the app's spinbox styling in both themes.
+        self.wp_smoothness_spin.setStyleSheet(_sb_style)
+        _dsb_style = _sb_style.replace("QSpinBox", "QDoubleSpinBox")
+        self.wp_min.setStyleSheet(_dsb_style)
+        self.wp_max.setStyleSheet(_dsb_style)
 
         # Progress bar — repaint with new theme colours
         self.prog.update()
