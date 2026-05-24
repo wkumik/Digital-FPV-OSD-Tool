@@ -1166,7 +1166,7 @@ class MainWindow(QMainWindow):
         self.wp_smoothness_spin.setValue(70)
         self.wp_smoothness_spin.setSuffix("%")
         self.wp_smoothness_spin.setToolTip(self.wp_smoothness.toolTip())
-        self.wp_smoothness_spin.valueChanged.connect(self._on_widget_smoothness_spin_changed)
+        self.wp_smoothness_spin.valueChanged.connect(self._on_widget_prop_changed)
         wp.addWidget(self.wp_smoothness_spin, row, 2)
         row += 1
 
@@ -2594,7 +2594,7 @@ class MainWindow(QMainWindow):
             # Size
             self.wp_w.setValue(max(2, min(60, int(round(w.w * 100)))))
             self.wp_h.setValue(max(2, min(60, int(round(w.h * 100)))))
-            smooth_pct = max(0, int(round(float(w.style.get("smoothness", 0.7)) * 100)))
+            smooth_pct = max(0, int(round(float(w.style.get("smoothness", 0.0)) * 100)))
             self.wp_smoothness.setValue(min(300, smooth_pct))
             self.wp_smoothness_spin.setValue(smooth_pct)
         finally:
@@ -2650,7 +2650,7 @@ class MainWindow(QMainWindow):
                     break
         new_w = Widget(type="digital", source=default_source,
                        x=0.5, y=0.10, w=0.18, h=0.06,
-                       style={"label": "", "color": "#FFFFFF"})
+                       style={"label": "", "color": "#FFFFFF", "smoothness": 0.7})
         self._widgets.append(new_w)
         self._refresh_widget_list()
         # Select the new one
@@ -2740,9 +2740,6 @@ class MainWindow(QMainWindow):
             pp.canvas.set_widgets(self._widgets)
         self._save_widget_settings()
         self._refresh_preview()
-
-    def _on_widget_smoothness_spin_changed(self, value: int):
-        self._on_widget_prop_changed(value)
 
     def _on_widget_pick_color(self):
         row = self.widget_list.currentRow()

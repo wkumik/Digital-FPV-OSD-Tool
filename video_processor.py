@@ -989,6 +989,15 @@ def _overlay_pipeline(
                 progress_callback(50, f"No OSD in trim window — blank overlay  [{enc_label}]")
         else:
             has_widgets = bool(render_cfg.widgets)
+            # Smoothed widgets render a different value every frame, so their
+            # output can't be cached by OSD-frame index alone. Only fold the
+            # per-frame timestamp into the cache key when smoothing is actually
+            # active; otherwise the SRT/OSD-index dedup cache keeps working.
+            any_smoothing = any(
+                w.type not in ("digital", "map")
+                and float(w.style.get("smoothness", 0.0)) > 0.0
+                for w in render_cfg.widgets
+            )
             for i in range(n_out_frames):
                 # Absolute timestamp of this video frame in the OSD file's timebase.
                 # use_pts: real PTS from ffprobe (handles gaps/dropped packets).
@@ -1013,7 +1022,8 @@ def _overlay_pipeline(
                 # widgets can't reuse stale renders across changing telemetry.
                 if has_widgets:
                     osd_key = raw_osd_frame.index if raw_osd_frame else -1
-                    widget_key = (id(td) if td is not None else 0, osd_key, abs_t_ms)
+                    widget_key = (id(td) if td is not None else 0, osd_key,
+                                  abs_t_ms if any_smoothing else 0)
                 else:
                     widget_key = 0
                 cache_key  = (osd_frame.index if osd_frame else -1, srt_text, widget_key)
@@ -1210,6 +1220,15 @@ def _chroma_key_pipeline(
             ffmpeg_proc.stdin.write(_flatten(renderer.composite(None, "")))
         else:
             has_widgets = bool(render_cfg.widgets)
+            # Smoothed widgets render a different value every frame, so their
+            # output can't be cached by OSD-frame index alone. Only fold the
+            # per-frame timestamp into the cache key when smoothing is actually
+            # active; otherwise the SRT/OSD-index dedup cache keeps working.
+            any_smoothing = any(
+                w.type not in ("digital", "map")
+                and float(w.style.get("smoothness", 0.0)) > 0.0
+                for w in render_cfg.widgets
+            )
             for i in range(n_out_frames):
                 t_sec    = pts_list[i] if use_pts else i / fps
                 abs_t_ms = int((_t_start + t_sec) * 1000 + config.osd_offset_ms)
@@ -1231,7 +1250,8 @@ def _chroma_key_pipeline(
 
                 if has_widgets:
                     osd_key = raw_osd_frame.index if raw_osd_frame else -1
-                    widget_key = (id(td) if td is not None else 0, osd_key, abs_t_ms)
+                    widget_key = (id(td) if td is not None else 0, osd_key,
+                                  abs_t_ms if any_smoothing else 0)
                 else:
                     widget_key = 0
                 cache_key  = (osd_frame.index if osd_frame else -1, srt_text, widget_key)
