@@ -85,8 +85,8 @@ def _version_tuple(v: str) -> tuple[int, ...]:
     """Parse '1.6', 'v1.6.1', or '1.6-rc2' into a tuple of ints.
 
     Anything past the first non-numeric segment is dropped, so a pre-release
-    'v1.7-beta' compares equal to 'v1.7'. Good enough for VueOSD's tagging
-    convention; revisit if we ever publish '1.7.1'-style patch releases.
+    'v1.7-beta' compares equal to 'v1.7'. Patch releases work fine — '1.7.1'
+    parses to (1, 7, 1) and sorts after (1, 7) — only suffixes collapse.
     """
     v = v.lstrip("vV").split("-", 1)[0].split("+", 1)[0]
     parts: list[int] = []
