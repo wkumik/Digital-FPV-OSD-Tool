@@ -1061,6 +1061,20 @@ class MainWindow(QMainWindow):
         wbtn_row.addWidget(self.widget_remove_btn)
         wgl.addLayout(wbtn_row)
 
+        # Diagnose-glyphs button — scans the current OSD frame for digit runs
+        # and reports the anchor glyph IDs sitting next to them. Use it when an
+        # OSD-sourced widget stays blank because the symbol table doesn't match
+        # the firmware's font (e.g. Betaflight vs INAV voltage/throttle icons).
+        self.widget_diag_btn = QPushButton("🔍  Diagnose OSD glyphs")
+        self.widget_diag_btn.setStyleSheet(BTN_SEC)
+        self.widget_diag_btn.setFixedHeight(26)
+        self.widget_diag_btn.setToolTip(
+            "Scan the current OSD frame for digit runs and report the "
+            "icon glyph IDs adjacent to them. Use this when an OSD-sourced "
+            "widget shows nothing.")
+        self.widget_diag_btn.clicked.connect(self._on_widget_diagnose)
+        wgl.addWidget(self.widget_diag_btn)
+
         # ── Properties section for selected widget ──────────────────────
         self._wprops = QWidget()
         wp = QGridLayout(self._wprops)
@@ -2740,6 +2754,88 @@ class MainWindow(QMainWindow):
             pp.canvas.set_widgets(self._widgets)
         self._save_widget_settings()
         self._refresh_preview()
+
+    def _on_widget_diagnose(self):
+        """Run the OSD glyph diagnostic on the current frame, show the report."""
+        from osd_decoder import find_anchor_candidates, debug_anchors
+        if not self.osd_data:
+            QMessageBox.information(self, "OSD diagnostic",
+                "Load an .osd file first — the diagnostic reads the current "
+                "OSD frame.")
+            return
+        ctrl = self._player_panel.controller
+        pct  = int(self._player_panel.timeline._position * _SL_MAX)
+        t_ms = ctrl.pct_to_video_time_ms(pct) + self.osd_offset_sb.value()
+        osd_frame = self.osd_data.frame_at_time(t_ms)
+        if osd_frame is None:
+            QMessageBox.information(self, "OSD diagnostic",
+                "No OSD frame at the current playhead. Scrub to a moment "
+                "where the OSD is visible and try again.")
+            return
+
+        cands = find_anchor_candidates(osd_frame)
+        anchors_found = debug_anchors(osd_frame, firmware=self._current_firmware)
+
+        # Frequency-rank anchor candidates so the most-used IDs surface first.
+        freq: dict[str, int] = {}
+        examples: dict[str, list[dict]] = {}
+        for c in cands:
+            k = c["anchor_hex"]
+            freq[k] = freq.get(k, 0) + 1
+            examples.setdefault(k, []).append(c)
+        ranked = sorted(freq.items(), key=lambda kv: -kv[1])
+
+        lines: list[str] = []
+        lines.append(f"Firmware:   {self._current_firmware}")
+        lines.append(f"Grid:       {osd_frame.grid_cols} x {osd_frame.grid_rows}")
+        lines.append(f"OSD t_ms:   {t_ms}  (frame idx {osd_frame.index})")
+        lines.append("")
+        lines.append("Anchors my decoder LOOKS for (and whether it found them):")
+        for key, pos in anchors_found.items():
+            tag = f"at row {pos[0]}, col {pos[1]}" if pos else "NOT FOUND"
+            lines.append(f"  {key:<22} -> {tag}")
+        lines.append("")
+        lines.append("Glyph IDs sitting next to DIGIT runs in this frame")
+        lines.append("(these are the actual unit-icon IDs the firmware uses):")
+        if not ranked:
+            lines.append("  (no digit-adjacent glyphs found)")
+        for hex_id, n in ranked:
+            sample = examples[hex_id][0]
+            lines.append(f"  {hex_id}  x{n:>3}  (e.g. row {sample['row']}, "
+                         f"col {sample['col']}, digits '{sample['digits']}' "
+                         f"on the {sample['side']})")
+
+        report = "\n".join(lines)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("OSD glyph diagnostic")
+        dlg.resize(620, 480)
+        vl = QVBoxLayout(dlg)
+        intro = QLabel("Copy this report and share it so the firmware symbol "
+                       "table can be corrected:")
+        intro.setWordWrap(True)
+        vl.addWidget(intro)
+        from PyQt6.QtWidgets import QPlainTextEdit
+        txt = QPlainTextEdit()
+        txt.setPlainText(report)
+        txt.setReadOnly(True)
+        # Monospace so the column-aligned report stays aligned
+        mono = QFont("Consolas", 10)
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        txt.setFont(mono)
+        vl.addWidget(txt)
+        btn_row = QHBoxLayout()
+        copy_btn = QPushButton("Copy to clipboard")
+        copy_btn.setStyleSheet(BTN_SEC)
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(report))
+        close_btn = QPushButton("Close")
+        close_btn.setStyleSheet(BTN_PRIMARY)
+        close_btn.clicked.connect(dlg.accept)
+        btn_row.addStretch()
+        btn_row.addWidget(copy_btn)
+        btn_row.addWidget(close_btn)
+        vl.addLayout(btn_row)
+        dlg.exec()
 
     def _on_widget_pick_color(self):
         row = self.widget_list.currentRow()
