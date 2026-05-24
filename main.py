@@ -2197,11 +2197,19 @@ class MainWindow(QMainWindow):
         self._cc_save_btn.setStyleSheet(BTN_SEC)
         self._cc_rst_btn.setStyleSheet(BTN_SEC)
         self._cc_rgb_btn.setStyleSheet(BTN_SEC)
-        # Custom Widgets panel buttons (constructed with BTN_SEC, so they need
-        # re-styling on theme switch or they keep the old palette in light mode).
+        # Custom Widgets + Hide-regions buttons (constructed with BTN_SEC, so
+        # they need re-styling on theme switch or they keep the old palette in
+        # light mode). Includes the checkable "Edit on canvas" / hide toggles.
         for _b in (self.widget_add_btn, self.widget_remove_btn,
-                   self.widget_diag_btn, self.wp_color_btn):
+                   self.widget_diag_btn, self.wp_color_btn, self.widget_edit_btn,
+                   self.hide_add_btn, self.hide_remove_btn, self.hide_clear_btn):
             _b.setStyleSheet(BTN_SEC)
+        # Gauge list (styled with theme tokens only at construction).
+        self.widget_list.setStyleSheet(
+            f"QListWidget{{background:{t['bg2']};color:{t['text']};"
+            f"border:1px solid {t['border']};border-radius:4px;font-size:{_fs(11)}px;}}"
+            f"QListWidget::item:selected{{background:{t['accent']};color:#ffffff;}}"
+        )
 
         # SpinBoxes
         _sb_style = (
