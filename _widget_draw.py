@@ -27,7 +27,7 @@ from _widget_primitives import (
 
 def _draw_digital(img: Any, w: Any,
                   value: Any, unit: str, default_fmt: str,
-                  rx: int, ry: int, ww: int, wh: int) -> None:
+                  rx: int, ry: int, ww: int, wh: int, text_value: Any = None) -> None:
     style = w.style
     if value is None:
         return
@@ -42,7 +42,7 @@ def _draw_digital(img: Any, w: Any,
     align    = str(style.get("align", "center"))
     shadow   = bool(style.get("shadow", True))
 
-    val_str = _format_value(value, fmt, default_fmt)
+    val_str = _format_value(value if text_value is None else text_value, fmt, default_fmt)
     parts: list[str] = []
     if label:
         parts.append(label)
@@ -81,7 +81,7 @@ def _draw_digital(img: Any, w: Any,
 
 def _draw_bar(img: Any, w: Any,
               value: Any, unit: str, default_fmt: str,
-              rx: int, ry: int, ww: int, wh: int) -> None:
+              rx: int, ry: int, ww: int, wh: int, text_value: Any = None) -> None:
     style = w.style
     if value is None:
         return
@@ -162,7 +162,7 @@ def _draw_bar(img: Any, w: Any,
 
     if draw_value:
         fmt = str(style.get("fmt", default_fmt))
-        val_str = _format_value(v, fmt, default_fmt)
+        val_str = _format_value(value if text_value is None else text_value, fmt, default_fmt)
         if bool(style.get("show_unit", True)) and unit:
             val_str = f"{val_str} {unit}"
         cap_y0, cap_y1 = text_anchor
@@ -186,7 +186,7 @@ def _draw_bar(img: Any, w: Any,
 
 def _draw_gauge(img: Any, w: Any,
                 value: Any, unit: str, default_fmt: str,
-                rx: int, ry: int, ww: int, wh: int) -> None:
+                rx: int, ry: int, ww: int, wh: int, text_value: Any = None) -> None:
     style = w.style
     if value is None:
         return
@@ -248,7 +248,7 @@ def _draw_gauge(img: Any, w: Any,
 
     if show_value:
         fmt = str(style.get("fmt", default_fmt))
-        val_str = _format_value(v, fmt, default_fmt)
+        val_str = _format_value(value if text_value is None else text_value, fmt, default_fmt)
         font = _font(int(size_s * float(style.get("font_scale", 0.32))))
         bb = pdraw.textbbox((0, 0), val_str, font=font)
         tw = bb[2] - bb[0]
@@ -273,7 +273,7 @@ def _draw_gauge(img: Any, w: Any,
 
 def _draw_semicircle(img: Any, w: Any,
                      value: Any, unit: str, default_fmt: str,
-                     rx: int, ry: int, ww: int, wh: int) -> None:
+                     rx: int, ry: int, ww: int, wh: int, text_value: Any = None) -> None:
     """Top half-arc with a perpendicular needle marker that slides along the arc."""
     style = w.style
     if value is None:
@@ -325,7 +325,7 @@ def _draw_semicircle(img: Any, w: Any,
 
     if show_value:
         fmt = str(style.get("fmt", default_fmt))
-        val_str = _format_value(v, fmt, default_fmt)
+        val_str = _format_value(value if text_value is None else text_value, fmt, default_fmt)
         has_unit = bool(style.get("show_unit", True)) and unit
         val_center_y = cy - r * (0.50 if has_unit else 0.40)
         font = _font(int(r * float(style.get("font_scale", 0.50))))
@@ -354,7 +354,7 @@ def _draw_semicircle(img: Any, w: Any,
 
 def _draw_tickdial(img: Any, w: Any,
                    value: Any, unit: str, default_fmt: str,
-                   rx: int, ry: int, ww: int, wh: int) -> None:
+                   rx: int, ry: int, ww: int, wh: int, text_value: Any = None) -> None:
     """Shallow upper arc with tick marks + numeric labels and a rotating needle."""
     style = w.style
     if value is None:
@@ -443,7 +443,7 @@ def _draw_tickdial(img: Any, w: Any,
 
     if show_value:
         fmt = str(style.get("fmt", default_fmt))
-        val_str = _format_value(v, fmt, default_fmt)
+        val_str = _format_value(value if text_value is None else text_value, fmt, default_fmt)
         has_unit = bool(style.get("show_unit", True)) and unit
         vfont = _font(int(r * float(style.get("font_scale", 0.28))))
         vbb = pdraw.textbbox((0, 0), val_str, font=vfont)
@@ -471,7 +471,7 @@ def _draw_tickdial(img: Any, w: Any,
 
 def _draw_ring(img: Any, w: Any,
                value: Any, unit: str, default_fmt: str,
-               rx: int, ry: int, ww: int, wh: int) -> None:
+               rx: int, ry: int, ww: int, wh: int, text_value: Any = None) -> None:
     """Thin full-circle ring; progress arc starts at 12 o'clock, sweeps clockwise."""
     style = w.style
     if value is None:
@@ -523,7 +523,7 @@ def _draw_ring(img: Any, w: Any,
 
     if show_value:
         fmt = str(style.get("fmt", default_fmt))
-        val_str = _format_value(v, fmt, default_fmt)
+        val_str = _format_value(value if text_value is None else text_value, fmt, default_fmt)
         has_unit = bool(style.get("show_unit", True)) and unit
         font = _font(int(size * float(style.get("font_scale", 0.28))))
         tbb = pdraw.textbbox((0, 0), val_str, font=font)
@@ -551,7 +551,7 @@ def _draw_ring(img: Any, w: Any,
 
 def _draw_analog(img: Any, w: Any,
                  value: Any, unit: str, default_fmt: str,
-                 rx: int, ry: int, ww: int, wh: int) -> None:
+                 rx: int, ry: int, ww: int, wh: int, text_value: Any = None) -> None:
     """Classic round instrument: dark face, tick marks, numeric scale, white needle."""
     style = w.style
     if value is None:
@@ -669,7 +669,7 @@ def _draw_analog(img: Any, w: Any,
 
     if show_value:
         fmt = str(style.get("fmt", default_fmt))
-        val_str = _format_value(v, fmt, default_fmt)
+        val_str = _format_value(value if text_value is None else text_value, fmt, default_fmt)
         vfont = _font(int(r * float(style.get("font_scale", 0.20))))
         vbb = pdraw.textbbox((0, 0), val_str, font=vfont)
         vw_ = vbb[2] - vbb[0]

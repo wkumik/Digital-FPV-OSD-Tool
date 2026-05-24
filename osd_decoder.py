@@ -100,10 +100,21 @@ _INAV_SYMBOLS: dict[str, tuple[int, str, int, float, int]] = {
 
 # ----- Betaflight ------------------------------------------------------------
 #
-# Betaflight and INAV share most unit-icon IDs in the same hex range. The few
-# that diverge (e.g. battery icons used for percent bars) are not used here.
+# Betaflight shares many of INAV's icon IDs but NOT all of them. The voltage,
+# throttle and current icons diverge — their IDs below match Betaflight's
+# osd_symbols.h (SYM_VOLT/SYM_THR/SYM_AMP) and were verified against real
+# Betaflight/WTFOS DVR footage: cluster "<91>3.80<06>" (cell V), "<04>  52"
+# (throttle %), "10.83<9A>" (amps). Inheriting INAV's 0x1F/0x95 here made
+# these read as MISSING, so OSD-sourced voltage/throttle widgets stayed blank.
 
-_BTFL_SYMBOLS: dict[str, tuple[int, str, int, float, int]] = dict(_INAV_SYMBOLS)
+_BTFL_SYMBOLS: dict[str, tuple[int, str, int, float, int]] = {
+    **_INAV_SYMBOLS,
+    # Voltage: digits sit LEFT of the 'V' glyph 0x06, with an explicit decimal
+    # point ("3.80V"), so scale is 1.0 (not INAV's integer-hundredths 0.01).
+    "osd_field_1f":     (0x06, "left",  5, 1.0, 0),
+    # Throttle: drawn as "<thr_icon>  NN" — icon 0x04 then a blank then digits.
+    "osd_throttle_pct": (0x04, "right", 3, 1.0, 2),
+}
 
 
 # ----- ArduPilot -------------------------------------------------------------
@@ -111,7 +122,15 @@ _BTFL_SYMBOLS: dict[str, tuple[int, str, int, float, int]] = dict(_INAV_SYMBOLS)
 # ArduPilot ships its own osd font and symbol set; many of the same anchor
 # IDs are used as INAV. Worth verifying against real footage.
 
-_ARDU_SYMBOLS: dict[str, tuple[int, str, int, float, int]] = dict(_INAV_SYMBOLS)
+_ARDU_SYMBOLS: dict[str, tuple[int, str, int, float, int]] = {
+    **_INAV_SYMBOLS,
+    "osd_speed_kmh":   (0xA1, "left", 4, 1.0, 0),
+    "osd_altitude_m":  (0xB1, "left", 5, 1.0, 0),
+    "osd_rssi":        (0x01, "right", 3, 1.0, 0),
+    "osd_mah_drawn":   (0x07, "left", 6, 1.0, 0),
+    "osd_current_a":   (0x9A, "left", 5, 1.0, 0),
+    "osd_field_1f":    (0x06, "left", 5, 1.0, 0),
+}
 
 
 FW_TABLES: dict[str, dict[str, tuple[int, str, int, float, int]]] = {
@@ -131,6 +150,7 @@ OSD_FIELD_REGISTRY: list[tuple[str, str, str, str]] = [
     ("osd_rssi",         "RSSI (OSD)",         "",     "{:.0f}"),
     ("osd_sats",         "GPS sats (OSD)",     "",     "{:.0f}"),
     ("osd_mah_drawn",    "mAh drawn (OSD)",    "mAh",  "{:.0f}"),
+    ("osd_current_a",    "Current (OSD)",      "A",    "{:.1f}"),
     ("osd_throttle_pct", "Throttle % (OSD)",   "%",    "{:.0f}"),
     ("osd_field_1f",     "Voltage (OSD)",      "V",    "{:.2f}"),
 ]
@@ -159,6 +179,10 @@ def _glyph_to_char(code: int,
         return "."
     if code == _MINUS:
         return "-"
+    if 0xC0 <= code <= 0xC9:
+        return str(code - 0xC0)
+    if 0xD0 <= code <= 0xD9:
+        return f".{code - 0xD0}"
     if extra is not None:
         return extra.get(code)
     return None

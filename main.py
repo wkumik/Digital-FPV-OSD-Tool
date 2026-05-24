@@ -63,7 +63,7 @@ _DARK_THEME = True   # module-level flag; toggled by the theme button
 
 # ─── Version & UI scale ───────────────────────────────────────────────────────
 
-VERSION = "1.7"
+VERSION = "1.7.1"
 
 _UI_SCALE = 1.0
 _SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -525,6 +525,68 @@ class CheckableComboBox(QComboBox):
         painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, opt)
 
 
+class CollapsibleGroupBox(QGroupBox):
+    """A QGroupBox whose title bar collapses/expands its contents on click.
+
+    Stays a real QGroupBox so GROUP_STYLE, the theme-restyle pass, and the
+    usual "add widgets to its layout" pattern all keep working unchanged — only
+    the class name at the call site differs. Click the title (the ▾/▸ arrow
+    marks the state); content is simply hidden so the box shrinks to its title.
+    """
+    def __init__(self, title: str = "", parent=None):
+        super().__init__(parent)
+        self._title_text = title
+        self._expanded = True
+        self._sync_title()
+
+    def _sync_title(self):
+        super().setTitle(f"{'▾' if self._expanded else '▸'}  {self._title_text}")
+
+    def setTitle(self, title: str):
+        self._title_text = title
+        self._sync_title()
+
+    def titleText(self) -> str:
+        return self._title_text
+
+    def isExpanded(self) -> bool:
+        return self._expanded
+
+    def setExpanded(self, expanded: bool):
+        if expanded == self._expanded:
+            return
+        self._expanded = expanded
+        self._sync_title()
+        for child in self.findChildren(
+                QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            child.setVisible(expanded)
+        self.updateGeometry()
+
+    def _label_rect(self):
+        """Vertical extent of the title label, for hit-testing the header."""
+        try:
+            from PyQt6.QtWidgets import QStyle, QStyleOptionGroupBox
+            opt = QStyleOptionGroupBox()
+            self.initStyleOption(opt)
+            return self.style().subControlRect(
+                QStyle.ComplexControl.CC_GroupBox, opt,
+                QStyle.SubControl.SC_GroupBoxLabel, self)
+        except Exception:
+            return None
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            y = ev.position().toPoint().y()
+            lr = self._label_rect()
+            in_header = (lr.top() <= y <= lr.bottom()) if lr is not None \
+                else (y <= self.fontMetrics().height() + 6)
+            if in_header:
+                self.setExpanded(not self._expanded)
+                ev.accept()
+                return
+        super().mousePressEvent(ev)
+
+
 class InfoCard(QGroupBox):
     def __init__(self, title, parent=None):
         super().__init__(title, parent)
@@ -884,7 +946,7 @@ class MainWindow(QMainWindow):
         ll.addLayout(hdr_row)
 
         # ── Files group ───────────────────────────────────────────────────────
-        fg = QGroupBox("Files")
+        fg = CollapsibleGroupBox("Files")
         fg.setStyleSheet(GROUP_STYLE)
         fgl = QVBoxLayout(fg)
         fgl.setSpacing(4)
@@ -913,7 +975,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(fg)
 
         # ── OSD Font group ────────────────────────────────────────────────────
-        fontg = QGroupBox("OSD Font")
+        fontg = CollapsibleGroupBox("OSD Font")
         fontg.setStyleSheet(GROUP_STYLE)
         fontgl = QVBoxLayout(fontg)
         fontgl.setSpacing(6)
@@ -966,7 +1028,7 @@ class MainWindow(QMainWindow):
         ll.addWidget(fontg)
 
         # ── Link Status Bar ───────────────────────────────────────────────────
-        srtg = QGroupBox("Link Status Bar")
+        srtg = CollapsibleGroupBox("Link Status Bar")
         srtg.setStyleSheet(GROUP_STYLE)
         srtgl = QVBoxLayout(srtg)
         srtgl.setSpacing(4)
@@ -1018,7 +1080,7 @@ class MainWindow(QMainWindow):
         properties section for the currently selected widget.
         """
         t = _T()
-        wg = QGroupBox("Custom Widgets")
+        wg = CollapsibleGroupBox("Custom Widgets")
         wg.setStyleSheet(GROUP_STYLE)
         wgl = QVBoxLayout(wg)
         wgl.setSpacing(4)
@@ -1060,6 +1122,20 @@ class MainWindow(QMainWindow):
         wbtn_row.addWidget(self.widget_add_btn)
         wbtn_row.addWidget(self.widget_remove_btn)
         wgl.addLayout(wbtn_row)
+
+        # Diagnose-glyphs button — scans the current OSD frame for digit runs
+        # and reports the anchor glyph IDs sitting next to them. Use it when an
+        # OSD-sourced widget stays blank because the symbol table doesn't match
+        # the firmware's font (e.g. Betaflight vs INAV voltage/throttle icons).
+        self.widget_diag_btn = QPushButton("🔍  Diagnose OSD glyphs")
+        self.widget_diag_btn.setStyleSheet(BTN_SEC)
+        self.widget_diag_btn.setFixedHeight(26)
+        self.widget_diag_btn.setToolTip(
+            "Scan the current OSD frame for digit runs and report the "
+            "icon glyph IDs adjacent to them. Use this when an OSD-sourced "
+            "widget shows nothing.")
+        self.widget_diag_btn.clicked.connect(self._on_widget_diagnose)
+        wgl.addWidget(self.widget_diag_btn)
 
         # ── Properties section for selected widget ──────────────────────
         self._wprops = QWidget()
@@ -1130,6 +1206,13 @@ class MainWindow(QMainWindow):
         self.wp_max.setDecimals(2)
         self.wp_max.setValue(100.0)
         self.wp_max.valueChanged.connect(self._on_widget_prop_changed)
+        _dsb_ss = (
+            f"QDoubleSpinBox{{background:{_T()['surface']};color:{_T()['text']};"
+            f"border:1px solid {_T()['border2']};border-radius:4px;padding:3px 6px;}}"
+            f"QDoubleSpinBox::up-button,QDoubleSpinBox::down-button{{width:16px;"
+            f"background:{_T()['surface2']};border-radius:2px;}}")
+        self.wp_min.setStyleSheet(_dsb_ss)
+        self.wp_max.setStyleSheet(_dsb_ss)
         mm_row.addWidget(self.wp_min)
         mm_row.addWidget(self.wp_max)
         mm_w = QWidget()
@@ -1151,6 +1234,28 @@ class MainWindow(QMainWindow):
         self.wp_h.setValue(8)
         self.wp_h.valueChanged.connect(self._on_widget_prop_changed)
         wp.addWidget(self.wp_h, row, 1, 1, 2)
+        row += 1
+
+        wp.addWidget(_lbl("Smoothness"), row, 0)
+        self.wp_smoothness = QSlider(Qt.Orientation.Horizontal)
+        self.wp_smoothness.setRange(0, 300)
+        self.wp_smoothness.setValue(70)
+        self.wp_smoothness.setToolTip(
+            "Visual alpha-beta smoothing for bars and gauges. 0% disables smoothing completely; values above 300% can be typed for testing.")
+        self.wp_smoothness.valueChanged.connect(self._on_widget_prop_changed)
+        wp.addWidget(self.wp_smoothness, row, 1)
+        self.wp_smoothness_spin = QSpinBox()
+        self.wp_smoothness_spin.setRange(0, 2147483647)
+        self.wp_smoothness_spin.setValue(70)
+        self.wp_smoothness_spin.setSuffix("%")
+        self.wp_smoothness_spin.setToolTip(self.wp_smoothness.toolTip())
+        self.wp_smoothness_spin.setStyleSheet(
+            f"QSpinBox{{background:{_T()['surface']};color:{_T()['text']};"
+            f"border:1px solid {_T()['border2']};border-radius:4px;padding:3px 6px;}}"
+            f"QSpinBox::up-button,QSpinBox::down-button{{width:16px;"
+            f"background:{_T()['surface2']};border-radius:2px;}}")
+        self.wp_smoothness_spin.valueChanged.connect(self._on_widget_prop_changed)
+        wp.addWidget(self.wp_smoothness_spin, row, 2)
         row += 1
 
         wgl.addWidget(self._wprops)
@@ -2092,6 +2197,20 @@ class MainWindow(QMainWindow):
         self._cc_save_btn.setStyleSheet(BTN_SEC)
         self._cc_rst_btn.setStyleSheet(BTN_SEC)
         self._cc_rgb_btn.setStyleSheet(BTN_SEC)
+        # Buttons constructed with BTN_SEC that the per-name restyling above
+        # misses, so they'd keep the old palette in light mode. Includes the
+        # checkable "Edit on canvas" / hide toggles and the font downloader.
+        for _b in (self.widget_add_btn, self.widget_remove_btn,
+                   self.widget_diag_btn, self.wp_color_btn, self.widget_edit_btn,
+                   self.hide_add_btn, self.hide_remove_btn, self.hide_clear_btn,
+                   self._download_fonts_btn):
+            _b.setStyleSheet(BTN_SEC)
+        # Gauge list (styled with theme tokens only at construction).
+        self.widget_list.setStyleSheet(
+            f"QListWidget{{background:{t['bg2']};color:{t['text']};"
+            f"border:1px solid {t['border']};border-radius:4px;font-size:{_fs(11)}px;}}"
+            f"QListWidget::item:selected{{background:{t['accent']};color:#ffffff;}}"
+        )
 
         # SpinBoxes
         _sb_style = (
@@ -2102,6 +2221,11 @@ class MainWindow(QMainWindow):
         )
         self.mbps_spin.setStyleSheet(_sb_style)
         self.osd_offset_sb.setStyleSheet(_sb_style)
+        # Widget-panel spinboxes — match the app's spinbox styling in both themes.
+        self.wp_smoothness_spin.setStyleSheet(_sb_style)
+        _dsb_style = _sb_style.replace("QSpinBox", "QDoubleSpinBox")
+        self.wp_min.setStyleSheet(_dsb_style)
+        self.wp_max.setStyleSheet(_dsb_style)
 
         # Progress bar — repaint with new theme colours
         self.prog.update()
@@ -2556,7 +2680,8 @@ class MainWindow(QMainWindow):
             return
         w = self._widgets[idx]
         controls = [self.wp_type, self.wp_source, self.wp_label, self.wp_color,
-                    self.wp_min, self.wp_max, self.wp_w, self.wp_h]
+                    self.wp_min, self.wp_max, self.wp_w, self.wp_h,
+                    self.wp_smoothness, self.wp_smoothness_spin]
         for c in controls:
             c.blockSignals(True)
         try:
@@ -2576,6 +2701,9 @@ class MainWindow(QMainWindow):
             # Size
             self.wp_w.setValue(max(2, min(60, int(round(w.w * 100)))))
             self.wp_h.setValue(max(2, min(60, int(round(w.h * 100)))))
+            smooth_pct = max(0, int(round(float(w.style.get("smoothness", 0.0)) * 100)))
+            self.wp_smoothness.setValue(min(300, smooth_pct))
+            self.wp_smoothness_spin.setValue(smooth_pct)
         finally:
             for c in controls:
                 c.blockSignals(False)
@@ -2591,6 +2719,8 @@ class MainWindow(QMainWindow):
         self.wp_type.setEnabled(not is_map)    # type locked when map is selected
         self.wp_min.setEnabled(not is_digital and not is_map)
         self.wp_max.setEnabled(not is_digital and not is_map)
+        self.wp_smoothness.setEnabled(not is_digital and not is_map)
+        self.wp_smoothness_spin.setEnabled(not is_digital and not is_map)
         self._wprops.setEnabled(True)
 
     def _on_widget_edit_toggled(self, checked: bool):
@@ -2627,7 +2757,7 @@ class MainWindow(QMainWindow):
                     break
         new_w = Widget(type="digital", source=default_source,
                        x=0.5, y=0.10, w=0.18, h=0.06,
-                       style={"label": "", "color": "#FFFFFF"})
+                       style={"label": "", "color": "#FFFFFF", "smoothness": 0.7})
         self._widgets.append(new_w)
         self._refresh_widget_list()
         # Select the new one
@@ -2678,6 +2808,17 @@ class MainWindow(QMainWindow):
         w.style["color"] = color_text
         w.style["min"] = float(self.wp_min.value())
         w.style["max"] = float(self.wp_max.value())
+        smooth_pct = self.wp_smoothness_spin.value()
+        if self.sender() is self.wp_smoothness:
+            smooth_pct = self.wp_smoothness.value()
+            self.wp_smoothness_spin.blockSignals(True)
+            self.wp_smoothness_spin.setValue(smooth_pct)
+            self.wp_smoothness_spin.blockSignals(False)
+        elif self.sender() is self.wp_smoothness_spin:
+            self.wp_smoothness.blockSignals(True)
+            self.wp_smoothness.setValue(min(300, smooth_pct))
+            self.wp_smoothness.blockSignals(False)
+        w.style["smoothness"] = max(0.0, smooth_pct / 100.0)
         w.w = max(0.02, min(0.60, self.wp_w.value() / 100.0))
         w.h = max(0.02, min(0.60, self.wp_h.value() / 100.0))
         # Map widgets want a chunky square by default - a 6%-tall sliver looks
@@ -2706,6 +2847,88 @@ class MainWindow(QMainWindow):
             pp.canvas.set_widgets(self._widgets)
         self._save_widget_settings()
         self._refresh_preview()
+
+    def _on_widget_diagnose(self):
+        """Run the OSD glyph diagnostic on the current frame, show the report."""
+        from osd_decoder import find_anchor_candidates, debug_anchors
+        if not self.osd_data:
+            QMessageBox.information(self, "OSD diagnostic",
+                "Load an .osd file first — the diagnostic reads the current "
+                "OSD frame.")
+            return
+        ctrl = self._player_panel.controller
+        pct  = int(self._player_panel.timeline._position * _SL_MAX)
+        t_ms = ctrl.pct_to_video_time_ms(pct) + self.osd_offset_sb.value()
+        osd_frame = self.osd_data.frame_at_time(t_ms)
+        if osd_frame is None:
+            QMessageBox.information(self, "OSD diagnostic",
+                "No OSD frame at the current playhead. Scrub to a moment "
+                "where the OSD is visible and try again.")
+            return
+
+        cands = find_anchor_candidates(osd_frame)
+        anchors_found = debug_anchors(osd_frame, firmware=self._current_firmware)
+
+        # Frequency-rank anchor candidates so the most-used IDs surface first.
+        freq: dict[str, int] = {}
+        examples: dict[str, list[dict]] = {}
+        for c in cands:
+            k = c["anchor_hex"]
+            freq[k] = freq.get(k, 0) + 1
+            examples.setdefault(k, []).append(c)
+        ranked = sorted(freq.items(), key=lambda kv: -kv[1])
+
+        lines: list[str] = []
+        lines.append(f"Firmware:   {self._current_firmware}")
+        lines.append(f"Grid:       {osd_frame.grid_cols} x {osd_frame.grid_rows}")
+        lines.append(f"OSD t_ms:   {t_ms}  (frame idx {osd_frame.index})")
+        lines.append("")
+        lines.append("Anchors my decoder LOOKS for (and whether it found them):")
+        for key, pos in anchors_found.items():
+            tag = f"at row {pos[0]}, col {pos[1]}" if pos else "NOT FOUND"
+            lines.append(f"  {key:<22} -> {tag}")
+        lines.append("")
+        lines.append("Glyph IDs sitting next to DIGIT runs in this frame")
+        lines.append("(these are the actual unit-icon IDs the firmware uses):")
+        if not ranked:
+            lines.append("  (no digit-adjacent glyphs found)")
+        for hex_id, n in ranked:
+            sample = examples[hex_id][0]
+            lines.append(f"  {hex_id}  x{n:>3}  (e.g. row {sample['row']}, "
+                         f"col {sample['col']}, digits '{sample['digits']}' "
+                         f"on the {sample['side']})")
+
+        report = "\n".join(lines)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("OSD glyph diagnostic")
+        dlg.resize(620, 480)
+        vl = QVBoxLayout(dlg)
+        intro = QLabel("Copy this report and share it so the firmware symbol "
+                       "table can be corrected:")
+        intro.setWordWrap(True)
+        vl.addWidget(intro)
+        from PyQt6.QtWidgets import QPlainTextEdit
+        txt = QPlainTextEdit()
+        txt.setPlainText(report)
+        txt.setReadOnly(True)
+        # Monospace so the column-aligned report stays aligned
+        mono = QFont("Consolas", 10)
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        txt.setFont(mono)
+        vl.addWidget(txt)
+        btn_row = QHBoxLayout()
+        copy_btn = QPushButton("Copy to clipboard")
+        copy_btn.setStyleSheet(BTN_SEC)
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(report))
+        close_btn = QPushButton("Close")
+        close_btn.setStyleSheet(BTN_PRIMARY)
+        close_btn.clicked.connect(dlg.accept)
+        btn_row.addStretch()
+        btn_row.addWidget(copy_btn)
+        btn_row.addWidget(close_btn)
+        vl.addLayout(btn_row)
+        dlg.exec()
 
     def _on_widget_pick_color(self):
         row = self.widget_list.currentRow()
@@ -2780,7 +3003,7 @@ class MainWindow(QMainWindow):
         td = self.srt_data.get_data_at_time(t_ms) if self.srt_data else None
         tframe = TelemetryFrame(td, raw_osd_frame, firmware=self._current_firmware,
                                 osd_font=self.font_obj, srt_file=self.srt_data,
-                                osd_file=self.osd_data)
+                                osd_file=self.osd_data, osd_time_ms=t_ms)
         srt_text = ""
         if td and self.srt_bar_check.isChecked():
             srt_text = td.status_line(self.srt_fields_combo.checked_keys())
@@ -2843,7 +3066,7 @@ class MainWindow(QMainWindow):
         td = self.srt_data.get_data_at_time(t_ms) if self.srt_data else None
         tframe = TelemetryFrame(td, raw_osd_frame, firmware=self._current_firmware,
                                 osd_font=self.font_obj, srt_file=self.srt_data,
-                                osd_file=self.osd_data)
+                                osd_file=self.osd_data, osd_time_ms=t_ms)
         srt_text = ""
         if td and self.srt_bar_check.isChecked():
             srt_text = td.status_line(self.srt_fields_combo.checked_keys())
