@@ -166,10 +166,16 @@ def download_and_apply(release: ReleaseInfo,
             progress_cb(pct, msg)
 
     _p(0, "Starting download...")
+    # NB: zipball_url is the GitHub *API* endpoint
+    # (api.github.com/repos/.../zipball/<ref>), which 302-redirects to the
+    # source archive on codeload.github.com. It must NOT be requested with
+    # `Accept: application/octet-stream` - the API answers that with HTTP 415
+    # Unsupported Media Type. That Accept value is only for the release-asset
+    # endpoint (see download_fonts, which hits browser_download_url instead).
     req = urllib.request.Request(
         release.zipball_url,
         headers={"User-Agent": USER_AGENT,
-                 "Accept":     "application/octet-stream"},
+                 "Accept":     "application/vnd.github+json"},
     )
 
     with tempfile.TemporaryDirectory(prefix="vueosd_update_") as tmp:

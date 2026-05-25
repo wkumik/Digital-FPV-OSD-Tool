@@ -2,6 +2,24 @@
 
 ---
 
+## v1.7.2 — 2026-05-25
+
+### Fixed
+- **In-app updater failed with "HTTP error 415 Unsupported Media Type."**
+  The updater requested the GitHub source archive with
+  `Accept: application/octet-stream`, which the GitHub API rejects with 415.
+  Now sends `Accept: application/vnd.github+json`.
+
+> ⚠️ **If you're on v1.7 or v1.7.1, you must update to v1.7.2 manually this one
+> time.** The broken updater shipped in those versions can't download its own
+> fix — clicking *Check for updates* will keep failing with the 415 error.
+> Download the v1.7.2 source zip from the
+> [Releases page](https://github.com/wkumik/Digital-FPV-OSD-Tool/releases) and
+> copy it over your install (your `settings.json` and `theme_custom.json` are
+> preserved). After this one manual update, the in-app updater works normally.
+
+---
+
 ## v1.1 — 2026-02-20
 
 ### New
