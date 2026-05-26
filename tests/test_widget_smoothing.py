@@ -265,5 +265,50 @@ class BetaflightOsdDecodeTest(unittest.TestCase):
         self.assertIsNone(extract_gps_coords(frame))
 
 
+class MapTileUnderlayTest(unittest.TestCase):
+    """Web-Mercator tile math + offline fallback for the map underlay. No
+    network: these exercise projection and the cooldown short-circuit."""
+
+    def test_pixel_projection_directions(self):
+        import _widget_map_tiles as T
+        x1, y1 = T._lonlat_to_pixel(50.0, 19.0, 14)
+        x2, y2 = T._lonlat_to_pixel(50.0, 20.0, 14)   # further east → larger x
+        x3, y3 = T._lonlat_to_pixel(51.0, 19.0, 14)   # further north → smaller y
+        self.assertGreater(x2, x1)
+        self.assertAlmostEqual(y1, y2, places=3)
+        self.assertLess(y3, y1)
+
+    def test_choose_zoom_fits_bbox(self):
+        import _widget_map_tiles as T
+        z = T._choose_zoom(50.03, 50.035, 19.987, 19.993, 600, 600, 19)
+        xl, yt = T._lonlat_to_pixel(50.035, 19.987, z)
+        xr, yb = T._lonlat_to_pixel(50.03, 19.993, z)
+        self.assertLessEqual(xr - xl, 600)
+        self.assertLessEqual(yb - yt, 600)
+
+    def test_is_underlay_and_attribution(self):
+        import _widget_map_tiles as T
+        self.assertTrue(T.is_underlay("street"))
+        self.assertTrue(T.is_underlay("satellite"))
+        self.assertFalse(T.is_underlay("none"))
+        self.assertFalse(T.is_underlay(""))
+        self.assertIn("OpenStreetMap", T.attribution("street"))
+
+    def test_offline_build_returns_none(self):
+        import time as _time
+        import _widget_map_tiles as T
+        T._MEM_TILES.clear()
+        T._FAILED.clear()
+        saved = T._net_cooldown_until
+        T._net_cooldown_until = _time.monotonic() + 1000.0   # simulate offline
+        try:
+            # Coords unlikely to be in the on-disk cache (open ocean).
+            lats = [1.2340 + i * 1e-4 for i in range(5)]
+            lons = [100.5670 + i * 1e-4 for i in range(5)]
+            self.assertIsNone(T.build_basemap(lats, lons, "street", 256, 256))
+        finally:
+            T._net_cooldown_until = saved
+
+
 if __name__ == "__main__":
     unittest.main()

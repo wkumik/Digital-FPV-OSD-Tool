@@ -1258,6 +1258,22 @@ class MainWindow(QMainWindow):
         wp.addWidget(self.wp_smoothness_spin, row, 2)
         row += 1
 
+        # Map underlay (map widgets only): draw a slippy-map basemap under the
+        # GPS track. Needs internet on first use; tiles are cached to disk.
+        self.wp_underlay_lbl = _lbl("Underlay")
+        wp.addWidget(self.wp_underlay_lbl, row, 0)
+        self.wp_underlay = QComboBox()
+        self.wp_underlay.addItem("None (track only)", "none")
+        self.wp_underlay.addItem("Street map (OSM)",  "street")
+        self.wp_underlay.addItem("Satellite (Esri)",  "satellite")
+        self.wp_underlay.setToolTip(
+            "Draw a map under the GPS track. Downloads map tiles on first use "
+            "(cached for offline reuse); falls back to a plain background when "
+            "offline.")
+        self.wp_underlay.currentIndexChanged.connect(self._on_widget_prop_changed)
+        wp.addWidget(self.wp_underlay, row, 1, 1, 2)
+        row += 1
+
         wgl.addWidget(self._wprops)
 
         wnote = QLabel("Widgets read live telemetry from the SRT track. "
@@ -2681,7 +2697,7 @@ class MainWindow(QMainWindow):
         w = self._widgets[idx]
         controls = [self.wp_type, self.wp_source, self.wp_label, self.wp_color,
                     self.wp_min, self.wp_max, self.wp_w, self.wp_h,
-                    self.wp_smoothness, self.wp_smoothness_spin]
+                    self.wp_smoothness, self.wp_smoothness_spin, self.wp_underlay]
         for c in controls:
             c.blockSignals(True)
         try:
@@ -2704,6 +2720,8 @@ class MainWindow(QMainWindow):
             smooth_pct = max(0, int(round(float(w.style.get("smoothness", 0.0)) * 100)))
             self.wp_smoothness.setValue(min(300, smooth_pct))
             self.wp_smoothness_spin.setValue(smooth_pct)
+            ui = self.wp_underlay.findData(str(w.style.get("map_underlay", "none")))
+            self.wp_underlay.setCurrentIndex(ui if ui >= 0 else 0)
         finally:
             for c in controls:
                 c.blockSignals(False)
@@ -2721,6 +2739,10 @@ class MainWindow(QMainWindow):
         self.wp_max.setEnabled(not is_digital and not is_map)
         self.wp_smoothness.setEnabled(not is_digital and not is_map)
         self.wp_smoothness_spin.setEnabled(not is_digital and not is_map)
+        # Underlay applies only to the map; hide it for every other widget.
+        self.wp_underlay.setVisible(is_map)
+        self.wp_underlay_lbl.setVisible(is_map)
+        self.wp_underlay.setEnabled(is_map)
         self._wprops.setEnabled(True)
 
     def _on_widget_edit_toggled(self, checked: bool):
@@ -2819,6 +2841,7 @@ class MainWindow(QMainWindow):
             self.wp_smoothness.setValue(min(300, smooth_pct))
             self.wp_smoothness.blockSignals(False)
         w.style["smoothness"] = max(0.0, smooth_pct / 100.0)
+        w.style["map_underlay"] = self.wp_underlay.currentData() or "none"
         w.w = max(0.02, min(0.60, self.wp_w.value() / 100.0))
         w.h = max(0.02, min(0.60, self.wp_h.value() / 100.0))
         # Map widgets want a chunky square by default - a 6%-tall sliver looks

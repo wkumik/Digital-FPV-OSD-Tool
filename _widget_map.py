@@ -14,10 +14,11 @@ Not part of the public API — imported by widgets.py only.
 from __future__ import annotations
 
 import math
+import time
 from typing import Any, Optional
 
 try:
-    from PIL import Image, ImageDraw
+    from PIL import Image, ImageDraw, ImageChops, ImageFont
     PIL_OK = True
 except ImportError:
     PIL_OK = False
@@ -27,7 +28,12 @@ from osd_decoder import (
     extract_plus_code as _extract_plus_code,
     extract_gps_coords as _extract_gps_coords,
 )
-from _widget_primitives import _parse_color
+from _widget_primitives import _parse_color, _font
+from _widget_map_tiles import (
+    build_basemap as _build_basemap,
+    is_underlay as _is_underlay,
+    attribution as _tile_attribution,
+)
 
 
 # ----- Projection cache ------------------------------------------------------
@@ -40,6 +46,14 @@ _PROJECTED_PLUS_CACHE:   dict[int, Any] = {}
 # caching it keeps playback off the per-frame spline recompute that pushed the
 # preview into slow motion.
 _SMOOTH_TRACE_CACHE:   dict[tuple, list] = {}
+# Assembled tile basemap + its lat/lon→pixel projector, keyed by
+# (provider, pw, ph, rounded-bbox). The basemap is static per flight, so this
+# keeps the (network + stitch) work off the per-frame path and the export loop.
+_BASEMAP_CACHE:        dict[tuple, Any] = {}
+# Monotonic timestamp of the last failed basemap build per key, so an offline
+# session doesn't re-spin the tile fetch every frame.
+_BASEMAP_FAIL:         dict[tuple, float] = {}
+_BASEMAP_RETRY_S = 30.0
 
 
 def invalidate_track_caches() -> None:
@@ -49,6 +63,8 @@ def invalidate_track_caches() -> None:
     _PROJECTED_OSDLATLON_CACHE.clear()
     _PROJECTED_PLUS_CACHE.clear()
     _SMOOTH_TRACE_CACHE.clear()
+    _BASEMAP_CACHE.clear()
+    _BASEMAP_FAIL.clear()
 
 
 # Treat (0, 0) and near-zero coords as "no GPS fix" — avoids a spurious point
@@ -249,6 +265,54 @@ def _catmull_rom_chain(pts: list[tuple[float, float]],
     return out
 
 
+# ----- Tile basemap (cached) -------------------------------------------------
+
+def _get_basemap(lats: list[float], lons: list[float], bbox: tuple,
+                 provider: str, pw: int, ph: int):
+    """Return ``(basemap_img, to_px)`` for the track, or None.
+
+    Caches the assembled basemap per (provider, patch size, rounded bbox) so
+    the tile fetch + stitch runs once per flight rather than per frame. After
+    a failed build (e.g. offline + uncached) it rate-limits retries so the
+    preview/export loop doesn't keep stalling on a dead network.
+    """
+    if not lats or len(lats) < 2:
+        return None
+    min_x, max_x, min_y, max_y = bbox
+    key = (provider, pw, ph,
+           round(min_x, 4), round(max_x, 4), round(min_y, 4), round(max_y, 4))
+    cached = _BASEMAP_CACHE.get(key)
+    if cached is not None:
+        return cached
+    last_fail = _BASEMAP_FAIL.get(key)
+    if last_fail is not None and (time.monotonic() - last_fail) < _BASEMAP_RETRY_S:
+        return None
+    result = _build_basemap(lats, lons, provider, pw, ph)
+    if result is None:
+        _BASEMAP_FAIL[key] = time.monotonic()
+        return None
+    _BASEMAP_CACHE[key] = result
+    _BASEMAP_FAIL.pop(key, None)
+    return result
+
+
+def _draw_attribution(patch: Any, text: str, pw: int, ph: int, SS: int) -> None:
+    """Draw the tile provider's required attribution in the bottom-left."""
+    d = ImageDraw.Draw(patch)
+    font = _font(max(7, int(ph * 0.045)))
+    try:
+        tb = d.textbbox((0, 0), text, font=font)
+        tw, th = tb[2] - tb[0], tb[3] - tb[1]
+    except Exception:
+        tw, th = len(text) * 6, 11
+    pad = max(2, SS)
+    x = pad + pad
+    y = ph - th - 3 * pad
+    d.rectangle([x - pad, y - pad, x + tw + pad, y + th + pad],
+                fill=(0, 0, 0, 130))
+    d.text((x, y), text, fill=(255, 255, 255, 210), font=font)
+
+
 # ----- Draw ------------------------------------------------------------------
 
 def _draw_map(img: Any, w: Any, telemetry: Any,
@@ -256,8 +320,11 @@ def _draw_map(img: Any, w: Any, telemetry: Any,
     """Draw the GPS track + current-position marker into the widget rect.
 
     Unlike the scalar-value draw functions this one needs whole-track context,
-    so it receives the full TelemetryFrame. Track source: SRT GPS preferred;
-    falls back to scanning the OsdFile for Plus Codes.
+    so it receives the full TelemetryFrame. Track source: SRT GPS preferred,
+    then raw OSD lat/lon, then OSD Plus Codes. An optional ``map_underlay``
+    style ("street"/"satellite") draws a slippy-map basemap beneath the track;
+    when tiles are unavailable it transparently falls back to the plain
+    equirectangular fit-to-bbox layout.
     """
     if ww < 8 or wh < 8:
         return
@@ -282,65 +349,95 @@ def _draw_map(img: Any, w: Any, telemetry: Any,
     padding_frac = max(0.0, min(0.25, float(style.get("padding", 0.08))))
     trace_w_pct  = float(style.get("trace_width", 0.012))
     marker_pct   = float(style.get("marker_size", 0.035))
+    underlay     = str(style.get("map_underlay", "none"))
 
     SS = max(1, int(style.get("supersample", 3)))
     pw = max(1, ww * SS)
     ph = max(1, wh * SS)
     patch = Image.new("RGBA", (pw, ph), (0, 0, 0, 0))
     pdraw = ImageDraw.Draw(patch)
+    corner_r = max(1, int(min(pw, ph) * 0.06))
 
-    if bg_color[3] > 0 or border_color[3] > 0:
-        radius = max(1, int(min(pw, ph) * 0.06))
-        pdraw.rounded_rectangle(
-            [0, 0, pw - 1, ph - 1], radius=radius,
-            fill=bg_color if bg_color[3] > 0 else None,
-            outline=border_color if border_color[3] > 0 else None,
-            width=max(1, SS),
-        )
+    if bg_color[3] > 0:
+        pdraw.rounded_rectangle([0, 0, pw - 1, ph - 1], radius=corner_r,
+                                fill=bg_color)
 
-    pad_px_x = int(pw * padding_frac)
-    pad_px_y = int(ph * padding_frac)
-    inner_w = pw - 2 * pad_px_x
-    inner_h = ph - 2 * pad_px_y
-    if inner_w < 4 or inner_h < 4:
-        return
+    # Recover raw lat/lon from the projected track (lat = -y, lon = x/cos_lat)
+    # so both the equirectangular and the Web-Mercator (tile) paths share one
+    # coordinate source.
+    track_ll = [(-y, (x / cos_lat) if cos_lat else x) for x, y in points]
 
-    min_x, max_x, min_y, max_y = bbox
-    span_x = max(max_x - min_x, 1e-9)
-    span_y = max(max_y - min_y, 1e-9)
-    scale = min(inner_w / span_x, inner_h / span_y)
-    cx_data   = (min_x + max_x) / 2.0
-    cy_data   = (min_y + max_y) / 2.0
-    cx_screen = pw / 2.0
-    cy_screen = ph / 2.0
+    # ── Resolve a lat/lon → patch-pixel projector ─────────────────────────
+    project = None
+    attribution = ""
+    if _is_underlay(underlay):
+        base = _get_basemap([ll[0] for ll in track_ll],
+                            [ll[1] for ll in track_ll],
+                            bbox, underlay, pw, ph)
+        if base is not None:
+            basemap, to_px = base
+            # Clip the basemap to the widget's rounded rectangle. Combine the
+            # basemap's own alpha with the rounded mask and paste through it,
+            # WITHOUT mutating the cached basemap (putalpha would re-erode the
+            # anti-aliased corners every reused frame).
+            mask = Image.new("L", (pw, ph), 0)
+            ImageDraw.Draw(mask).rounded_rectangle(
+                [0, 0, pw - 1, ph - 1], radius=corner_r, fill=255)
+            clip = ImageChops.multiply(basemap.split()[3], mask)
+            patch.paste(basemap, (0, 0), clip)
+            project = to_px
+            attribution = _tile_attribution(underlay)
 
-    def _to_screen(x: float, y: float) -> tuple[float, float]:
-        return (cx_screen + (x - cx_data) * scale,
-                cy_screen + (y - cy_data) * scale)
+    if project is None:
+        # Equirectangular fit-to-bbox (no underlay, or tiles unavailable).
+        pad_px_x = int(pw * padding_frac)
+        pad_px_y = int(ph * padding_frac)
+        inner_w = pw - 2 * pad_px_x
+        inner_h = ph - 2 * pad_px_y
+        if inner_w < 4 or inner_h < 4:
+            return
+        min_x, max_x, min_y, max_y = bbox
+        span_x = max(max_x - min_x, 1e-9)
+        span_y = max(max_y - min_y, 1e-9)
+        e_scale = min(inner_w / span_x, inner_h / span_y)
+        cx_data = (min_x + max_x) / 2.0
+        cy_data = (min_y + max_y) / 2.0
+
+        def project(lat: float, lon: float) -> tuple[float, float]:
+            x = lon * cos_lat
+            y = -lat
+            return (pw / 2.0 + (x - cx_data) * e_scale,
+                    ph / 2.0 + (y - cy_data) * e_scale)
 
     # Project → denoise (moving avg) → Catmull-Rom → draw. Cached per
-    # (track, patch size): independent of the playhead, so per-frame playback
-    # reuses it instead of recomputing the spline every frame.
+    # (track, patch size, projector mode): independent of the playhead, so
+    # per-frame playback reuses it instead of recomputing the spline.
     trace_px  = max(1 * SS, int(min(pw, ph) * trace_w_pct))
-    cache_key = (id(points), pw, ph)
+    mode_tag  = underlay if attribution else "equi"
+    cache_key = (id(points), pw, ph, mode_tag)
     smooth_pts = _SMOOTH_TRACE_CACHE.get(cache_key)
     if smooth_pts is None:
-        screen_pts = [_to_screen(x, y) for x, y in points]
+        screen_pts = [project(lat, lon) for lat, lon in track_ll]
         smooth_pts = _catmull_rom_chain(_smooth_track(screen_pts, radius=3), steps=8)
         _SMOOTH_TRACE_CACHE[cache_key] = smooth_pts
     pdraw.line(smooth_pts, fill=trace_color, width=trace_px, joint="curve")
 
     cur = _current_position(telemetry)
     if cur is not None:
-        cur_lat, cur_lon = cur
-        cur_x = cur_lon * cos_lat
-        cur_y = -cur_lat
-        mx, my = _to_screen(cur_x, cur_y)
+        mx, my = project(cur[0], cur[1])
         mr     = max(2 * SS, int(min(pw, ph) * marker_pct))
         halo_r = mr + max(1 * SS, int(mr * 0.35))
         pdraw.ellipse([mx - halo_r, my - halo_r, mx + halo_r, my + halo_r],
                       fill=(255, 255, 255, 180))
         pdraw.ellipse([mx - mr, my - mr, mx + mr, my + mr], fill=marker_color)
+
+    # Border last so it frames the basemap cleanly.
+    if border_color[3] > 0:
+        pdraw.rounded_rectangle([0, 0, pw - 1, ph - 1], radius=corner_r,
+                                outline=border_color, width=max(1, SS))
+
+    if attribution:
+        _draw_attribution(patch, attribution, pw, ph, SS)
 
     if SS > 1:
         patch = patch.resize((ww, wh), Image.LANCZOS)
