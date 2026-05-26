@@ -2,6 +2,26 @@
 
 ---
 
+## v1.7.3 — 2026-05-26
+
+### Fixed
+- **Betaflight OSD telemetry: speed, altitude and GPS sats read as blank.**
+  The Betaflight symbol table inherited INAV's glyph IDs, so speed latched
+  onto the artificial-horizon centre line, altitude matched the vario
+  down-arrow, and the sat count never matched at all. Now keyed to
+  Betaflight's `SYM_KPH`/`SYM_ALTITUDE`/`SYM_SAT_R`.
+- **Blinking OSD fields never decoded.** OSD cells carry blink/attribute bits
+  in the high byte, so a flashing glyph (e.g. the GPS-sat count while
+  acquiring lock) arrived as `0x2NN`/`0x3NN` and failed every anchor match.
+  The decoder now masks those bits.
+
+### New
+- **Map can plot raw OSD GPS lat/lon** (`SYM_LAT`/`SYM_LON` readout), a
+  higher-precision track tier between SRT GPS and the Plus Code fallback.
+- **Vertical speed (m/s) and Power (W)** added as OSD widget sources.
+
+---
+
 ## v1.7.2 — 2026-05-25
 
 ### Fixed

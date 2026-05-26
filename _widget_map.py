@@ -3,9 +3,10 @@
 """
 _widget_map.py - GPS map widget: projection, smoothing, and rendering.
 
-Track source priority: SRT GPS (1 Hz, sub-metre precision) → OSD Plus Code
-fallback (~14 m grid resolution). Projection is cached by object id so the
-expensive scan runs only once per SrtFile / OsdFile instance.
+Track source priority: SRT GPS (1 Hz, sub-metre precision) → raw OSD lat/lon
+(SYM_LAT/SYM_LON decimal readout) → OSD Plus Code fallback (~14 m grid
+resolution). Projection is cached by object id so the expensive scan runs
+only once per SrtFile / OsdFile instance.
 
 Not part of the public API — imported by widgets.py only.
 """
@@ -24,14 +25,16 @@ except ImportError:
 from osd_decoder import (
     decode_plus_code as _decode_plus_code,
     extract_plus_code as _extract_plus_code,
+    extract_gps_coords as _extract_gps_coords,
 )
 from _widget_primitives import _parse_color
 
 
 # ----- Projection cache ------------------------------------------------------
 
-_PROJECTED_GPS_CACHE:  dict[int, Any] = {}
-_PROJECTED_PLUS_CACHE: dict[int, Any] = {}
+_PROJECTED_GPS_CACHE:    dict[int, Any] = {}
+_PROJECTED_OSDLATLON_CACHE: dict[int, Any] = {}
+_PROJECTED_PLUS_CACHE:   dict[int, Any] = {}
 # Smoothed + Catmull-Rom trace polyline, keyed by (id(points), pw, ph). The
 # polyline depends only on the track and patch size, never the playhead, so
 # caching it keeps playback off the per-frame spline recompute that pushed the
@@ -43,6 +46,7 @@ def invalidate_track_caches() -> None:
     """Clear projection caches. Call whenever srt_data or osd_data is replaced
     so the map widget picks up the new track on the next render."""
     _PROJECTED_GPS_CACHE.clear()
+    _PROJECTED_OSDLATLON_CACHE.clear()
     _PROJECTED_PLUS_CACHE.clear()
     _SMOOTH_TRACE_CACHE.clear()
 
@@ -101,6 +105,35 @@ def _project_gps_track(srt_file: Any):
     return result
 
 
+def _project_osd_latlon_track(osd_file: Any):
+    """Return cached projection of the raw OSD lat/lon track.
+
+    Scans every OsdFrame for SYM_LAT/SYM_LON coordinate readouts and projects
+    the de-duplicated sequence. Higher precision than the Plus Code grid, so
+    it ranks above it when there's no SRT GPS.
+    """
+    if osd_file is None or not getattr(osd_file, "frames", None):
+        return None, None, 1.0
+    cache_key = id(osd_file)
+    cached = _PROJECTED_OSDLATLON_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    lats: list[float] = []
+    lons: list[float] = []
+    last: Optional[tuple[float, float]] = None
+    for frame in osd_file.frames:
+        pt = _extract_gps_coords(frame)
+        if pt is None or pt == last:
+            continue
+        last = pt
+        lats.append(pt[0])
+        lons.append(pt[1])
+    result = _project_latlon(lats, lons)
+    _PROJECTED_OSDLATLON_CACHE[cache_key] = result
+    return result
+
+
 def _project_plus_code_track(osd_file: Any):
     """Return cached projection of the OSD Plus Code track.
 
@@ -147,6 +180,9 @@ def _current_position(telemetry: Any) -> Optional[tuple[float, float]]:
         return cur_lat, cur_lon
     osd_frame = getattr(telemetry, "osd_frame", None)
     if osd_frame is not None:
+        pt = _extract_gps_coords(osd_frame)
+        if pt is not None:
+            return pt
         code = _extract_plus_code(osd_frame)
         if code:
             pt = _decode_plus_code(code)
@@ -229,7 +265,9 @@ def _draw_map(img: Any, w: Any, telemetry: Any,
     points, bbox, cos_lat = _project_gps_track(srt_file)
     if not points or bbox is None:
         osd_file = getattr(telemetry, "osd_file", None)
-        points, bbox, cos_lat = _project_plus_code_track(osd_file)
+        points, bbox, cos_lat = _project_osd_latlon_track(osd_file)
+        if not points or bbox is None:
+            points, bbox, cos_lat = _project_plus_code_track(osd_file)
     if not points or bbox is None:
         return
 

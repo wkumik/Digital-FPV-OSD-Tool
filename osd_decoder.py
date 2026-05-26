@@ -109,6 +109,31 @@ _INAV_SYMBOLS: dict[str, tuple[int, str, int, float, int]] = {
 
 _BTFL_SYMBOLS: dict[str, tuple[int, str, int, float, int]] = {
     **_INAV_SYMBOLS,
+    # Speed (km/h): Betaflight's SYM_KPH is 0x9E, NOT INAV's 0x88. Inheriting
+    # 0x88 made the decoder lock onto the artificial-horizon centre line
+    # ("<88><88>") and read no digits, while the real "47<9E>" cluster was
+    # ignored. Verified against real DVR footage: 6, 17, 47, 58 km/h.
+    "osd_speed_kmh":    (0x9E, "left",  4, 1.0, 0),
+    # Altitude: anchor on SYM_ALTITUDE (0x7F) which prefixes the value
+    # ("<7F>23<0C>"), digits to the RIGHT. 0x7F is unique to altitude, so it
+    # can't collide with the shared metres suffix 0x0C (SYM_M) used by the
+    # distance fields. INAV's inherited 0x76 is Betaflight's vario down-arrow,
+    # so it never matched the altitude readout.
+    "osd_altitude_m":   (0x7F, "right", 5, 1.0, 0),
+    # GPS sats: Betaflight draws "<SAT_L><SAT_R>NN" — SYM_SAT_L 0x1E then
+    # SYM_SAT_R 0x1F then the count, with the tens place blank for <10 sats
+    # ("<1E><1F> 5"), so anchor on 0x1F reading RIGHT with gap=1 to step over
+    # that leading space. The sat field commonly blinks while acquiring lock;
+    # the attribute-bit mask in extract_value() is what lets it match then.
+    "osd_sats":         (0x1F, "right", 3, 1.0, 1),
+    # Vertical speed (m/s): SYM_MPS 0x9F suffixes the value, with a small
+    # up/down arrow (0x75/0x76) prefixing it ("<75>2.9<9F>"). Digits sit LEFT
+    # of the 0x9F suffix.
+    "osd_vspeed_ms":    (0x9F, "left",  4, 1.0, 0),
+    # Power (W): SYM_WATT 0x57 suffixes the wattage ("149W"). 0x57 is ASCII
+    # 'W', so the digit-adjacency requirement in extract_value() is what keeps
+    # it from latching onto stray 'W' glyphs in mode/heading text.
+    "osd_power_w":      (0x57, "left",  4, 1.0, 0),
     # Voltage: digits sit LEFT of the 'V' glyph 0x06, with an explicit decimal
     # point ("3.80V"), so scale is 1.0 (not INAV's integer-hundredths 0.01).
     "osd_field_1f":     (0x06, "left",  5, 1.0, 0),
@@ -152,6 +177,8 @@ OSD_FIELD_REGISTRY: list[tuple[str, str, str, str]] = [
     ("osd_mah_drawn",    "mAh drawn (OSD)",    "mAh",  "{:.0f}"),
     ("osd_current_a",    "Current (OSD)",      "A",    "{:.1f}"),
     ("osd_throttle_pct", "Throttle % (OSD)",   "%",    "{:.0f}"),
+    ("osd_vspeed_ms",    "Vert. speed (OSD)",  "m/s",  "{:.1f}"),
+    ("osd_power_w",      "Power (OSD)",        "W",    "{:.0f}"),
     ("osd_field_1f",     "Voltage (OSD)",      "V",    "{:.2f}"),
 ]
 
@@ -161,6 +188,20 @@ OSD_FIELD_REGISTRY: list[tuple[str, str, str, str]] = [
 # map digits to ASCII 0x30-0x39.
 _DIGIT_LO, _DIGIT_HI = 0x30, 0x39
 _DOT, _MINUS = 0x2E, 0x2D
+
+# OSD cells are stored as raw u16 words. Betaflight/MSP DisplayPort packs
+# attribute bits (notably BLINK) into the high byte, so a blinking glyph 0xNN
+# arrives as 0x1NN / 0x2NN / 0x3NN and toggles between those as it flashes.
+# The font sheet itself never needs more than 256 distinct glyphs per element
+# we decode, so the actual glyph ID is always the low byte. Masking here lets
+# anchor matching and digit reading work on blinking fields (e.g. the GPS-sat
+# count, which blinks while acquiring lock) instead of silently missing them.
+_GLYPH_MASK = 0xFF
+
+
+def _cell(code: int) -> int:
+    """Strip MSP attribute/blink bits, leaving the bare glyph ID."""
+    return code & _GLYPH_MASK
 
 
 def _glyph_to_char(code: int,
@@ -225,7 +266,7 @@ def _read_left(grid, row_base: int, anchor_col: int, max_digits: int,
     # Skip up to max_gap blank cells before the digit run starts.
     skipped = 0
     while cc >= 0 and skipped < max_gap:
-        code = grid[row_base + cc]
+        code = _cell(grid[row_base + cc])
         if code == 0 or code == 0x20:
             cc -= 1
             skipped += 1
@@ -236,14 +277,14 @@ def _read_left(grid, row_base: int, anchor_col: int, max_digits: int,
     for _ in range(max_digits):
         if cc < 0:
             break
-        ch = _glyph_to_char(grid[row_base + cc], extra)
+        ch = _glyph_to_char(_cell(grid[row_base + cc]), extra)
         if ch is None:
             # Try treating this unknown cell as a decimal separator if we
             # already have at least one digit and the next cell to the left
             # is also a digit.
             if (allow_separator and not separator_used and out
                     and cc - 1 >= 0
-                    and _glyph_to_char(grid[row_base + cc - 1], extra) is not None):
+                    and _glyph_to_char(_cell(grid[row_base + cc - 1]), extra) is not None):
                 out.insert(0, ".")
                 separator_used = True
                 cc -= 1
@@ -265,7 +306,7 @@ def _read_right(grid, row_base: int, anchor_col: int, max_digits: int,
     cc = anchor_col + 1
     skipped = 0
     while cc < cols and skipped < max_gap:
-        code = grid[row_base + cc]
+        code = _cell(grid[row_base + cc])
         if code == 0 or code == 0x20:
             cc += 1
             skipped += 1
@@ -276,11 +317,11 @@ def _read_right(grid, row_base: int, anchor_col: int, max_digits: int,
     for _ in range(max_digits):
         if cc >= cols:
             break
-        ch = _glyph_to_char(grid[row_base + cc], extra)
+        ch = _glyph_to_char(_cell(grid[row_base + cc]), extra)
         if ch is None:
             if (allow_separator and not separator_used and out
                     and cc + 1 < cols
-                    and _glyph_to_char(grid[row_base + cc + 1], extra) is not None):
+                    and _glyph_to_char(_cell(grid[row_base + cc + 1]), extra) is not None):
                 out.append(".")
                 separator_used = True
                 cc += 1
@@ -329,7 +370,7 @@ def extract_value(osd_frame, field_key: str,
     cols = osd_frame.grid_cols
 
     for i, code in enumerate(grid):
-        if code != anchor:
+        if _cell(code) != anchor:
             continue
         r, c = divmod(i, cols)
         row_base = r * cols
@@ -364,12 +405,13 @@ def debug_anchors(osd_frame, firmware: str = "INAV") -> dict[str, tuple[int, int
         found: Optional[Tuple[int, int]] = None
         for r in range(rows):
             row_base = r * cols
-            try:
-                c = grid[row_base:row_base + cols].index(anchor)
-                found = (r, c)
+            # Mask attribute/blink bits so a flashing anchor still matches.
+            for c in range(cols):
+                if _cell(grid[row_base + c]) == anchor:
+                    found = (r, c)
+                    break
+            if found is not None:
                 break
-            except ValueError:
-                continue
         out[key] = found
     return out
 
@@ -790,4 +832,101 @@ def extract_plus_code(osd_frame) -> Optional[str]:
         m = _PLUS_CODE_RE.search(cl["text"].upper())
         if m:
             return m.group(0)
+    return None
+
+
+# ----- Raw GPS lat/lon ------------------------------------------------------
+#
+# Betaflight / INAV can print the raw coordinates as high-precision decimals,
+# each prefixed by a direction glyph: SYM_LAT then the latitude, SYM_LON then
+# the longitude (e.g. "<89>50.0346578" / "<98>19.9916804"). This is far more
+# precise than the ~14 m Plus Code grid, so the map widget prefers it as a
+# fallback track source when there's no SRT GPS.
+
+_SYM_LAT = 0x89   # Betaflight SYM_LAT (latitude direction glyph)
+_SYM_LON = 0x98   # Betaflight SYM_LON (longitude direction glyph)
+
+# A coordinate readout carries many decimal places; altitude / voltage / speed
+# carry at most one or two. Requiring a deep fraction keeps those out.
+_GPS_MIN_DECIMALS = 4
+# (0, 0) / near-zero means "no fix yet" — skip it (mirrors the map widget eps).
+_GPS_ZERO_EPS = 1e-3
+
+
+def _cluster_number(codes: list[int]) -> tuple[Optional[int], str]:
+    """Pull the leading icon glyph and numeric text out of a cell cluster.
+
+    Walks ``codes`` (attribute bits masked), skipping any prefix icon glyphs,
+    then reads the first contiguous digit/dot/minus run. Returns
+    ``(icon_glyph_id | None, number_string)``; the icon is the glyph sitting
+    immediately before the digit run (e.g. SYM_LAT), or None if the run starts
+    at the cluster edge.
+    """
+    icon: Optional[int] = None
+    chars: list[str] = []
+    started = False
+    for code in codes:
+        g = _cell(code)
+        ch = _glyph_to_char(g)
+        if ch is None:
+            if started:
+                break
+            icon = g          # remember the glyph just before the digits
+            continue
+        started = True
+        chars.append(ch)
+    return icon, "".join(chars)
+
+
+def extract_gps_coords(osd_frame) -> Optional[Tuple[float, float]]:
+    """Decode raw (lat, lon) from the OSD grid, or None when absent.
+
+    Primary signal is the direction glyph (SYM_LAT 0x89 / SYM_LON 0x98) that
+    prefixes each coordinate. When those aren't present we fall back to a
+    geometric heuristic over the high-precision decimals: any magnitude > 90
+    must be longitude, and of the remaining the one drawn higher on screen
+    (lower row) is latitude. Both paths require a deep fraction so altitude /
+    voltage / speed readouts can't be mistaken for coordinates.
+    """
+    if osd_frame is None:
+        return None
+
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    others: list[tuple[int, float]] = []   # (row, value) for un-iconned coords
+
+    for cl in find_cell_clusters(osd_frame):
+        icon, s = _cluster_number(cl["codes"])
+        if "." not in s:
+            continue
+        if len(s.rsplit(".", 1)[-1]) < _GPS_MIN_DECIMALS:
+            continue
+        val = _parse_run(list(s), 1.0)
+        if val is None or abs(val) < _GPS_ZERO_EPS:
+            continue
+        if icon == _SYM_LAT and lat is None and abs(val) <= 90.0:
+            lat = val
+        elif icon == _SYM_LON and lon is None and abs(val) <= 180.0:
+            lon = val
+        else:
+            others.append((cl["row"], val))
+
+    if lat is not None and lon is not None:
+        return lat, lon
+
+    # Heuristic fallback for fonts that don't draw the direction glyphs.
+    if lat is None and lon is None and len(others) >= 2:
+        big = [v for _, v in others if abs(v) > 90.0]
+        if len(big) == 1:
+            lon = big[0]
+            rest = [(r, v) for r, v in others if abs(v) <= 90.0]
+            if rest:
+                lat = min(rest, key=lambda rv: rv[0])[1]
+        else:
+            # Both in lat range: the upper (smaller row) is latitude.
+            ordered = sorted(others, key=lambda rv: rv[0])
+            lat, lon = ordered[0][1], ordered[1][1]
+
+    if lat is not None and lon is not None:
+        return lat, lon
     return None

@@ -1,9 +1,18 @@
 import unittest
 
 from _widget_primitives import _format_value
-from osd_decoder import extract_value
+from osd_decoder import extract_value, extract_gps_coords
 from osd_parser import OsdFile, OsdFrame
 from widgets import TelemetryFrame, Widget, _get_widget_value
+
+
+def _place(rows, cols, *placements):
+    """Build an OsdFrame from (row, col, [codes]) placements onto a blank grid."""
+    grid = [0] * (rows * cols)
+    for r, c, codes in placements:
+        for i, code in enumerate(codes):
+            grid[r * cols + c + i] = code
+    return OsdFrame(0, 0, grid, cols, rows)
 
 
 def speed_frame(index, time_ms, text, cols=5):
@@ -209,6 +218,51 @@ class WidgetSmoothingTest(unittest.TestCase):
                 and abs(nxt - current) > 0.05
                 and (current - prev) * (nxt - current) < 0
             )
+
+
+class BetaflightOsdDecodeTest(unittest.TestCase):
+    """Regression coverage for the Betaflight glyph IDs and blink-bit masking
+    (see the DJI HD .osd sample with raw lat/lon)."""
+
+    def test_speed_uses_kph_glyph_not_inav(self):
+        # "47<KPH>" — SYM_KPH 0x9E, digits to the left. INAV's inherited 0x88
+        # would instead latch the artificial-horizon centre line.
+        frame = _place(20, 53, (9, 14, [0x34, 0x37, 0x9E]))
+        self.assertEqual(extract_value(frame, "osd_speed_kmh", "Betaflight"), 47)
+
+    def test_altitude_anchors_on_altitude_glyph(self):
+        # "<ALT>23<M>" — SYM_ALTITUDE 0x7F prefix, digits to the right.
+        frame = _place(20, 53, (9, 36, [0x7F, 0x32, 0x33, 0x0C]))
+        self.assertEqual(extract_value(frame, "osd_altitude_m", "Betaflight"), 23)
+
+    def test_blinking_sat_count_decodes_through_attribute_bits(self):
+        # "<SAT_L><SAT_R> 5" with blink bits set (0x2xx). 0x220 is a blanked
+        # tens place; gap=1 steps over it to read the single-digit count.
+        frame = _place(20, 53,
+                       (0, 2, [0x21E, 0x21F, 0x220, 0x235]))
+        self.assertEqual(extract_value(frame, "osd_sats", "Betaflight"), 5)
+
+    def test_vspeed_and_power_decode(self):
+        frame = _place(20, 53,
+                       (10, 36, [0x75, 0x32, 0x2E, 0x39, 0x9F]),   # "<up>2.9<MPS>"
+                       (15, 4,  [0x31, 0x34, 0x39, 0x57]))          # "149W"
+        self.assertAlmostEqual(
+            extract_value(frame, "osd_vspeed_ms", "Betaflight"), 2.9, places=6)
+        self.assertEqual(extract_value(frame, "osd_power_w", "Betaflight"), 149)
+
+    def test_extract_gps_coords_from_direction_glyphs(self):
+        lat = [0x89] + [ord(c) for c in "50.0346578"]
+        lon = [0x98] + [ord(c) for c in "19.9916804"]
+        frame = _place(20, 53, (17, 3, lat), (18, 3, lon))
+        pt = extract_gps_coords(frame)
+        self.assertIsNotNone(pt)
+        self.assertAlmostEqual(pt[0], 50.0346578, places=6)
+        self.assertAlmostEqual(pt[1], 19.9916804, places=6)
+
+    def test_extract_gps_coords_ignores_shallow_decimals(self):
+        # Altitude "23.4<M>" must not be mistaken for a coordinate.
+        frame = _place(20, 53, (9, 36, [0x7F, 0x32, 0x33, 0x2E, 0x34, 0x0C]))
+        self.assertIsNone(extract_gps_coords(frame))
 
 
 if __name__ == "__main__":
