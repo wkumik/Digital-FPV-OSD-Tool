@@ -1155,6 +1155,8 @@ class MainWindow(QMainWindow):
         wp.addWidget(_lbl("Source"), row, 0)
         self.wp_source = QComboBox()
         for key, name, *_ in WIDGET_DATA_SOURCES:
+            if key == "gps_track":
+                continue   # the GPS map lives in its own dedicated box
             self.wp_source.addItem(name, key)
         self.wp_source.currentIndexChanged.connect(self._on_widget_prop_changed)
         wp.addWidget(self.wp_source, row, 1, 1, 2)
@@ -1260,38 +1262,6 @@ class MainWindow(QMainWindow):
 
         wgl.addWidget(self._wprops)
 
-        # ── Map section (collapsible) ────────────────────────────────────
-        # Map-specific controls live in their own group so they don't clutter
-        # the generic readout properties. Shown only when a GPS-map widget is
-        # selected (toggled in _apply_widget_to_props).
-        self._map_group = CollapsibleGroupBox("Map")
-        self._map_group.setStyleSheet(GROUP_STYLE)
-        mg = QGridLayout(self._map_group)
-        mg.setContentsMargins(10, 16, 10, 10)
-        mg.setHorizontalSpacing(6)
-        mg.setVerticalSpacing(4)
-
-        mg.addWidget(_lbl("Underlay"), 0, 0)
-        self.wp_underlay = QComboBox()
-        self.wp_underlay.addItem("None (track only)", "none")
-        self.wp_underlay.addItem("Street map (OSM)",  "street")
-        self.wp_underlay.addItem("Satellite (Esri)",  "satellite")
-        self.wp_underlay.setToolTip(
-            "Draw a map under the GPS track. Downloads map tiles on first use "
-            "(cached for offline reuse); falls back to a plain background when "
-            "offline.")
-        self.wp_underlay.currentIndexChanged.connect(self._on_widget_prop_changed)
-        mg.addWidget(self.wp_underlay, 0, 1)
-
-        mnote = QLabel("Tiles download on first use and are cached for offline "
-                       "reuse. The map auto-zooms to the flight path.")
-        mnote.setStyleSheet(f"color:{t['muted']};font-size:{_fs(10)}px;")
-        mnote.setWordWrap(True)
-        mg.addWidget(mnote, 1, 0, 1, 2)
-
-        self._map_group.setVisible(False)
-        wgl.addWidget(self._map_group)
-
         wnote = QLabel("Widgets read live telemetry from the SRT track. "
                        "Toggle edit mode then drag on the preview to reposition.")
         wnote.setStyleSheet(f"color:{t['muted']};font-size:10px;")
@@ -1299,6 +1269,66 @@ class MainWindow(QMainWindow):
         wgl.addWidget(wnote)
 
         ll.addWidget(wg)
+
+        # ── GPS Map (its own top-level box, separate from Custom Widgets) ──
+        # Always visible; the whole box greys out when the loaded files carry
+        # no GPS (no SRT lat/lon, OSD lat/lon, or Plus Code). The map is still
+        # a widget under the hood (draggable on the canvas), but it's created,
+        # sized, and styled here rather than from the widget list.
+        mapg = CollapsibleGroupBox("GPS Map")
+        mapg.setStyleSheet(GROUP_STYLE)
+        self.map_group = mapg
+        mgl = QGridLayout(mapg)
+        mgl.setContentsMargins(10, 16, 10, 10)
+        mgl.setHorizontalSpacing(6)
+        mgl.setVerticalSpacing(4)
+
+        mrow = 0
+        self.map_show_chk = QCheckBox("Show map overlay")
+        self.map_show_chk.setStyleSheet(f"QCheckBox{{color:{t['text']};}}")
+        self.map_show_chk.toggled.connect(self._on_map_show_toggled)
+        mgl.addWidget(self.map_show_chk, mrow, 0, 1, 2)
+        mrow += 1
+
+        mgl.addWidget(_lbl("Underlay"), mrow, 0)
+        self.map_underlay = QComboBox()
+        self.map_underlay.addItem("None (track only)", "none")
+        self.map_underlay.addItem("Street map (OSM)",  "street")
+        self.map_underlay.addItem("Satellite (Esri)",  "satellite")
+        self.map_underlay.setToolTip(
+            "Draw a map under the GPS track. Downloads map tiles on first use "
+            "(cached for offline reuse); falls back to a plain background when "
+            "offline.")
+        self.map_underlay.currentIndexChanged.connect(self._on_map_underlay_changed)
+        mgl.addWidget(self.map_underlay, mrow, 1)
+        mrow += 1
+
+        # Size sliders run the full 5–100%: at 100% the map matches the video
+        # width/height exactly (geometry is centred, so it fills the frame).
+        mgl.addWidget(_lbl("Width"), mrow, 0)
+        self.map_w = QSlider(Qt.Orientation.Horizontal)
+        self.map_w.setRange(5, 100)
+        self.map_w.setValue(30)
+        self.map_w.valueChanged.connect(self._on_map_size_changed)
+        mgl.addWidget(self.map_w, mrow, 1)
+        mrow += 1
+
+        mgl.addWidget(_lbl("Height"), mrow, 0)
+        self.map_h = QSlider(Qt.Orientation.Horizontal)
+        self.map_h.setRange(5, 100)
+        self.map_h.setValue(30)
+        self.map_h.valueChanged.connect(self._on_map_size_changed)
+        mgl.addWidget(self.map_h, mrow, 1)
+        mrow += 1
+
+        mnote = QLabel("Plots the GPS flight path. Tiles download on first use "
+                       "and are cached offline; the map auto-zooms to the path. "
+                       "Drag to reposition with “Edit on canvas”.")
+        mnote.setStyleSheet(f"color:{t['muted']};font-size:{_fs(10)}px;")
+        mnote.setWordWrap(True)
+        mgl.addWidget(mnote, mrow, 0, 1, 2)
+
+        ll.addWidget(mapg)
 
         # Initial UI state
         self._wprops.setEnabled(False)
@@ -2069,6 +2099,7 @@ class MainWindow(QMainWindow):
             self.srt_data = None
             self.osd_data = None
             invalidate_track_caches()
+            self._refresh_map_box()
             self._load_video(path)
             self._auto_detect(path)
         elif ext == '.osd':
@@ -2302,6 +2333,7 @@ class MainWindow(QMainWindow):
         self.srt_data = None
         self.osd_data = None
         invalidate_track_caches()
+        self._refresh_map_box()
         self._load_video(p)
         self._auto_detect(p)
 
@@ -2420,6 +2452,7 @@ class MainWindow(QMainWindow):
                       "ArduPilot": "ArduPilot", "ARDU": "ArduPilot"}
             self._on_fw_changed(fw_map.get(fc, "Betaflight"))
             self._st(f"✓ OSD: {self.osd_data.frame_count} frames  [{fc or 'Unknown FC'}]")
+            self._refresh_map_box()
             self._refresh_preview()
         except Exception as e:
             self._st(f"✗ OSD: {e}")
@@ -2457,6 +2490,7 @@ class MainWindow(QMainWindow):
             # P1 runs Betaflight over Walksnail/DJI goggles → always uses BTFL_DJI font
             self._auto_select_font("Betaflight", "BTFL_DJI")
             self._st(f"✓ P1 OSD: {self.osd_data.frame_count} frames embedded")
+            self._refresh_map_box()
             self._refresh_preview()
         except Exception as e:
             self._st(f"✗ P1 OSD: {e}")
@@ -2484,6 +2518,7 @@ class MainWindow(QMainWindow):
                 if t.link_mbps:              self.srt_card.add_row("Mbps", str(t.link_mbps))
             self.srt_row.set_path(path)
             self._st(f"✓ SRT: {len(self.srt_data.entries)} entries")
+            self._refresh_map_box()
             self._refresh_preview()
         except Exception as e:
             self._st(f"✗ SRT: {e}")
@@ -2686,23 +2721,56 @@ class MainWindow(QMainWindow):
         """Persist self._widgets to settings.json under the 'widgets' key."""
         _save_settings(widgets=[w.to_dict() for w in self._widgets])
 
+    def _is_map_widget(self, w) -> bool:
+        return w.type == "map" or w.source == "gps_track"
+
+    def _map_widget(self):
+        """Return the single GPS-map widget, or None."""
+        for w in self._widgets:
+            if self._is_map_widget(w):
+                return w
+        return None
+
+    def _list_row_to_widget_index(self, row: int) -> int:
+        """Map a widget-list row to its index in self._widgets (maps are not
+        listed, so the two aren't 1:1)."""
+        if 0 <= row < self.widget_list.count():
+            d = self.widget_list.item(row).data(Qt.ItemDataRole.UserRole)
+            if d is not None:
+                return int(d)
+        return -1
+
+    def _widget_index_to_list_row(self, idx: int) -> int:
+        for r in range(self.widget_list.count()):
+            if self.widget_list.item(r).data(Qt.ItemDataRole.UserRole) == idx:
+                return r
+        return -1
+
     def _refresh_widget_list(self):
-        """Repopulate the widget QListWidget rows from self._widgets."""
+        """Repopulate the widget QListWidget from self._widgets.
+
+        The GPS map is excluded (it has its own box); each row stores its real
+        self._widgets index in UserRole so selection/edit still address the
+        right widget."""
         if not hasattr(self, "widget_list"):
             return
         self.widget_list.blockSignals(True)
         self.widget_list.clear()
-        for w in self._widgets:
+        for i, w in enumerate(self._widgets):
+            if self._is_map_widget(w):
+                continue
             src_label = next((name for k, name, *_ in WIDGET_DATA_SOURCES
                               if k == w.source), w.source)
             item = QListWidgetItem(f"{w.type} · {src_label}")
+            item.setData(Qt.ItemDataRole.UserRole, i)
             self.widget_list.addItem(item)
         self.widget_list.blockSignals(False)
         # Sync canvas mirror + selection chrome
         pp = getattr(self, "_player_panel", None)
         if pp is not None:
             pp.canvas.set_widgets(self._widgets)
-        self.widget_remove_btn.setEnabled(bool(self._widgets))
+        self.widget_remove_btn.setEnabled(self.widget_list.count() > 0)
+        self._refresh_map_box()
 
     def _apply_widget_to_props(self, idx: int):
         """Populate the properties section from widgets[idx]. Blocks signals
@@ -2711,9 +2779,13 @@ class MainWindow(QMainWindow):
             self._wprops.setEnabled(False)
             return
         w = self._widgets[idx]
+        if self._is_map_widget(w):
+            # The map is configured in the GPS Map box, never here.
+            self._wprops.setEnabled(False)
+            return
         controls = [self.wp_type, self.wp_source, self.wp_label, self.wp_color,
                     self.wp_min, self.wp_max, self.wp_w, self.wp_h,
-                    self.wp_smoothness, self.wp_smoothness_spin, self.wp_underlay]
+                    self.wp_smoothness, self.wp_smoothness_spin]
         for c in controls:
             c.blockSignals(True)
         try:
@@ -2736,27 +2808,20 @@ class MainWindow(QMainWindow):
             smooth_pct = max(0, int(round(float(w.style.get("smoothness", 0.0)) * 100)))
             self.wp_smoothness.setValue(min(300, smooth_pct))
             self.wp_smoothness_spin.setValue(smooth_pct)
-            ui = self.wp_underlay.findData(str(w.style.get("map_underlay", "none")))
-            self.wp_underlay.setCurrentIndex(ui if ui >= 0 else 0)
         finally:
             for c in controls:
                 c.blockSignals(False)
-        # Visibility: label is meaningful for digital readouts and the analog
-        # dial (which prints it inside the face); min/max apply to every
+        # Label is meaningful for digital readouts and the analog dial (which
+        # prints it inside the face); min/max + smoothness apply to every
         # value-scaled type (bar, gauge, semicircle, tickdial, ring, analog).
-        # Map is selected via source="gps_track"; type is then locked to "map"
-        # automatically and the type combo is disabled.
         is_digital = w.type == "digital"
-        is_map     = w.source == "gps_track" or w.type == "map"
-        self.wp_label.setEnabled((is_digital or w.type == "analog") and not is_map)
-        self.wp_source.setEnabled(True)        # source combo always active
-        self.wp_type.setEnabled(not is_map)    # type locked when map is selected
-        self.wp_min.setEnabled(not is_digital and not is_map)
-        self.wp_max.setEnabled(not is_digital and not is_map)
-        self.wp_smoothness.setEnabled(not is_digital and not is_map)
-        self.wp_smoothness_spin.setEnabled(not is_digital and not is_map)
-        # The Map section is relevant only to the GPS-map widget.
-        self._map_group.setVisible(is_map)
+        self.wp_label.setEnabled(is_digital or w.type == "analog")
+        self.wp_source.setEnabled(True)
+        self.wp_type.setEnabled(True)
+        self.wp_min.setEnabled(not is_digital)
+        self.wp_max.setEnabled(not is_digital)
+        self.wp_smoothness.setEnabled(not is_digital)
+        self.wp_smoothness_spin.setEnabled(not is_digital)
         self._wprops.setEnabled(True)
 
     def _on_widget_edit_toggled(self, checked: bool):
@@ -2771,10 +2836,11 @@ class MainWindow(QMainWindow):
         self._refresh_preview()
 
     def _on_widget_list_selected(self, row: int):
+        idx = self._list_row_to_widget_index(row)
         pp = getattr(self, "_player_panel", None)
         if pp is not None:
-            pp.canvas.set_widget_selected(row)
-        self._apply_widget_to_props(row)
+            pp.canvas.set_widget_selected(idx)
+        self._apply_widget_to_props(idx)
 
     def _on_widget_add(self):
         # Default to a digital readout for whichever source has data right now,
@@ -2796,40 +2862,36 @@ class MainWindow(QMainWindow):
                        style={"label": "", "color": "#FFFFFF", "smoothness": 0.7})
         self._widgets.append(new_w)
         self._refresh_widget_list()
-        # Select the new one
-        self.widget_list.setCurrentRow(len(self._widgets) - 1)
+        # Select the new one (its list row, which excludes any map widget).
+        new_row = self._widget_index_to_list_row(len(self._widgets) - 1)
+        if new_row >= 0:
+            self.widget_list.setCurrentRow(new_row)
         self._save_widget_settings()
         self._refresh_preview()
 
     def _on_widget_remove(self):
         row = self.widget_list.currentRow()
-        if not (0 <= row < len(self._widgets)):
+        idx = self._list_row_to_widget_index(row)
+        if not (0 <= idx < len(self._widgets)):
             return
-        del self._widgets[row]
+        del self._widgets[idx]
         self._refresh_widget_list()
-        new_row = min(row, len(self._widgets) - 1)
-        self.widget_list.setCurrentRow(new_row)
+        new_row = min(row, self.widget_list.count() - 1)
+        if new_row >= 0:
+            self.widget_list.setCurrentRow(new_row)
         self._save_widget_settings()
         self._refresh_preview()
 
     def _on_widget_prop_changed(self, *_):
-        row = self.widget_list.currentRow()
-        if not (0 <= row < len(self._widgets)):
+        idx = self._list_row_to_widget_index(self.widget_list.currentRow())
+        if not (0 <= idx < len(self._widgets)):
             return
-        w = self._widgets[row]
+        w = self._widgets[idx]
+        if self._is_map_widget(w):
+            return   # maps are edited only in the GPS Map box
         new_type   = self.wp_type.currentData() or "digital"
         new_source = self.wp_source.currentData() or w.source
-        # Source drives map: selecting gps_track forces type=map; leaving it
-        # resets to digital so the type combo isn't left stuck on "map".
-        was_map    = w.source == "gps_track"
-        is_now_map = new_source == "gps_track"
-        if is_now_map:
-            new_type = "map"
-        elif was_map:
-            new_type = "digital"
-        type_changed     = new_type != w.type
-        source_changed   = new_source != w.source
-        switching_to_map = is_now_map and not was_map
+        type_changed = new_type != w.type
         w.type   = new_type
         w.source = new_source
         # Update style fields
@@ -2855,30 +2917,115 @@ class MainWindow(QMainWindow):
             self.wp_smoothness.setValue(min(300, smooth_pct))
             self.wp_smoothness.blockSignals(False)
         w.style["smoothness"] = max(0.0, smooth_pct / 100.0)
-        w.style["map_underlay"] = self.wp_underlay.currentData() or "none"
         w.w = max(0.02, min(0.60, self.wp_w.value() / 100.0))
         w.h = max(0.02, min(0.60, self.wp_h.value() / 100.0))
-        # Map widgets want a chunky square by default - a 6%-tall sliver looks
-        # nothing like a map. When switching INTO map from a small/flat
-        # readout, promote the size and sync the sliders so the UI reflects
-        # the new dims.
-        if switching_to_map and (w.w < 0.12 or w.h < 0.12):
-            w.w = 0.22
-            w.h = 0.22
-            self.wp_w.blockSignals(True); self.wp_h.blockSignals(True)
-            self.wp_w.setValue(int(round(w.w * 100)))
-            self.wp_h.setValue(int(round(w.h * 100)))
-            self.wp_w.blockSignals(False); self.wp_h.blockSignals(False)
         # Refresh row label so the list reflects the new type/source
         src_label = next((name for k, name, *_ in WIDGET_DATA_SOURCES
                           if k == w.source), w.source)
-        self.widget_list.blockSignals(True)
-        self.widget_list.item(row).setText(f"{w.type} · {src_label}")
-        self.widget_list.blockSignals(False)
-        if type_changed or (source_changed and (is_now_map or was_map)):
-            # Toggle which property controls are relevant for the new type/source
-            self._apply_widget_to_props(row)
+        row = self._widget_index_to_list_row(idx)
+        if row >= 0:
+            self.widget_list.blockSignals(True)
+            self.widget_list.item(row).setText(f"{w.type} · {src_label}")
+            self.widget_list.blockSignals(False)
+        if type_changed:
+            # Toggle which property controls are relevant for the new type.
+            self._apply_widget_to_props(idx)
         # Push the change to the canvas + repaint
+        pp = getattr(self, "_player_panel", None)
+        if pp is not None:
+            pp.canvas.set_widgets(self._widgets)
+        self._save_widget_settings()
+        self._refresh_preview()
+
+    # ── GPS Map box ────────────────────────────────────────────────────────
+
+    def _gps_track_available(self) -> bool:
+        """True when the loaded files carry a GPS track (SRT lat/lon, OSD
+        lat/lon, or a Plus Code). Cached per (srt, osd) so repeated UI syncs
+        don't re-scan the OSD."""
+        key = (id(self.srt_data), id(self.osd_data))
+        cached = getattr(self, "_gps_avail_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        avail = False
+        srt = self.srt_data
+        if srt is not None:
+            for e in getattr(srt, "entries", None) or []:
+                td = getattr(e, "telemetry", None)
+                lat = getattr(td, "gps_lat", None)
+                lon = getattr(td, "gps_lon", None)
+                if lat is not None and lon is not None and (
+                        abs(lat) > 1e-3 or abs(lon) > 1e-3):
+                    avail = True
+                    break
+        if not avail and self.osd_data is not None:
+            from osd_decoder import extract_gps_coords, extract_plus_code
+            frames = getattr(self.osd_data, "frames", None) or []
+            step = max(1, len(frames) // 60)
+            for i in range(0, len(frames), step):
+                fr = frames[i]
+                if extract_gps_coords(fr) is not None or extract_plus_code(fr):
+                    avail = True
+                    break
+        self._gps_avail_cache = (key, avail)
+        return avail
+
+    def _refresh_map_box(self):
+        """Sync the GPS Map box to the current map widget + GPS availability."""
+        if not hasattr(self, "map_show_chk"):
+            return
+        avail = self._gps_track_available()
+        mw = self._map_widget()
+        self.map_group.setEnabled(avail)
+        for ctrl, on in ((self.map_show_chk, True),
+                         (self.map_underlay, mw is not None),
+                         (self.map_w, mw is not None),
+                         (self.map_h, mw is not None)):
+            ctrl.blockSignals(True)
+        self.map_show_chk.setChecked(mw is not None)
+        if mw is not None:
+            ui = self.map_underlay.findData(str(mw.style.get("map_underlay", "none")))
+            self.map_underlay.setCurrentIndex(ui if ui >= 0 else 0)
+            self.map_w.setValue(max(5, min(100, int(round(mw.w * 100)))))
+            self.map_h.setValue(max(5, min(100, int(round(mw.h * 100)))))
+        for ctrl in (self.map_show_chk, self.map_underlay, self.map_w, self.map_h):
+            ctrl.blockSignals(False)
+        self.map_underlay.setEnabled(mw is not None)
+        self.map_w.setEnabled(mw is not None)
+        self.map_h.setEnabled(mw is not None)
+
+    def _on_map_show_toggled(self, checked: bool):
+        mw = self._map_widget()
+        if checked and mw is None:
+            underlay = self.map_underlay.currentData() or "none"
+            # Centred so growing Width/Height to 100% fills the video exactly.
+            self._widgets.append(Widget(
+                type="map", source="gps_track",
+                x=0.5, y=0.5, w=0.30, h=0.30,
+                style={"color": "#FFFFFF", "map_underlay": underlay}))
+        elif not checked and mw is not None:
+            self._widgets.remove(mw)
+        self._refresh_widget_list()
+        self._save_widget_settings()
+        self._refresh_preview()
+
+    def _on_map_underlay_changed(self, *_):
+        mw = self._map_widget()
+        if mw is None:
+            return
+        mw.style["map_underlay"] = self.map_underlay.currentData() or "none"
+        pp = getattr(self, "_player_panel", None)
+        if pp is not None:
+            pp.canvas.set_widgets(self._widgets)
+        self._save_widget_settings()
+        self._refresh_preview()
+
+    def _on_map_size_changed(self, *_):
+        mw = self._map_widget()
+        if mw is None:
+            return
+        mw.w = max(0.05, min(1.0, self.map_w.value() / 100.0))
+        mw.h = max(0.05, min(1.0, self.map_h.value() / 100.0))
         pp = getattr(self, "_player_panel", None)
         if pp is not None:
             pp.canvas.set_widgets(self._widgets)
@@ -2968,8 +3115,8 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _on_widget_pick_color(self):
-        row = self.widget_list.currentRow()
-        if not (0 <= row < len(self._widgets)):
+        idx = self._list_row_to_widget_index(self.widget_list.currentRow())
+        if not (0 <= idx < len(self._widgets)):
             return
         current = self.wp_color.text().strip() or "#FFFFFF"
         col = QColorDialog.getColor(QColor(current), self, "Widget colour")
@@ -2980,13 +3127,16 @@ class MainWindow(QMainWindow):
     # Canvas-driven changes (drag) — keep model + UI in sync.
 
     def _on_widget_canvas_selected(self, idx: int):
-        # The canvas already updated its own _widget_selected; mirror to the list.
-        if 0 <= idx < self.widget_list.count():
+        # idx indexes self._widgets (the canvas holds every widget). Mirror it
+        # to the list row — but the map isn't listed (own box), so selecting it
+        # on canvas just clears the list selection.
+        if 0 <= idx < len(self._widgets) and not self._is_map_widget(self._widgets[idx]):
+            row = self._widget_index_to_list_row(idx)
             self.widget_list.blockSignals(True)
-            self.widget_list.setCurrentRow(idx)
+            self.widget_list.setCurrentRow(row)
             self.widget_list.blockSignals(False)
             self._apply_widget_to_props(idx)
-        elif idx == -1:
+        else:
             self.widget_list.blockSignals(True)
             self.widget_list.clearSelection()
             self.widget_list.blockSignals(False)
@@ -3010,7 +3160,10 @@ class MainWindow(QMainWindow):
             self._widgets[idx].y = y
             self._widgets[idx].w = w
             self._widgets[idx].h = h
-            self._apply_widget_to_props(idx)
+            if self._is_map_widget(self._widgets[idx]):
+                self._refresh_map_box()   # keep the W/H sliders in sync
+            else:
+                self._apply_widget_to_props(idx)
         self._save_widget_settings()
         self._refresh_preview()
 

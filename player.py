@@ -129,6 +129,13 @@ class VideoCanvas(QWidget):
         self._widget_src_rect_fn = None       # () -> (sx, sy, sw, sh) or None
         self._widget_drag_offset: tuple[int, int] | None = None  # (dx, dy) px within widget
         self._widget_drag_idx: int = -1
+        # Edge/corner resize of the selected widget. _resize_edge is a combo of
+        # 't'/'b' and 'l'/'r' (e.g. 'tl', 'r'); _resize_bounds is the widget's
+        # [left, top, right, bottom] in normalised source coords, with only the
+        # dragged edges moving so the opposite edge stays pinned.
+        self._widget_resize_idx: int = -1
+        self._widget_resize_edge: str | None = None
+        self._resize_bounds: list[float] | None = None
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -590,6 +597,40 @@ class VideoCanvas(QWidget):
                 return i
         return -1
 
+    _RESIZE_MARGIN = 7   # px band around a border that grabs a resize handle
+
+    def _widget_resize_edge_at(self, w, x: int, y: int) -> "str | None":
+        """Return the resize edge under (x, y) for widget ``w`` — a combo of
+        't'/'b' and 'l'/'r' (corners), a single side, or None when the cursor
+        isn't on a border."""
+        r = self._widget_rect_px(w)
+        if r is None:
+            return None
+        rx, ry, rw, rh = r
+        m = self._RESIZE_MARGIN
+        if not (rx - m <= x <= rx + rw + m and ry - m <= y <= ry + rh + m):
+            return None
+        edge = ""
+        if abs(y - ry) <= m:
+            edge += "t"
+        elif abs(y - (ry + rh)) <= m:
+            edge += "b"
+        if abs(x - rx) <= m:
+            edge += "l"
+        elif abs(x - (rx + rw)) <= m:
+            edge += "r"
+        return edge or None
+
+    @staticmethod
+    def _resize_cursor(edge: str):
+        if edge in ("tl", "br"):
+            return Qt.CursorShape.SizeFDiagCursor
+        if edge in ("tr", "bl"):
+            return Qt.CursorShape.SizeBDiagCursor
+        if edge in ("l", "r"):
+            return Qt.CursorShape.SizeHorCursor
+        return Qt.CursorShape.SizeVerCursor
+
     def _paint_widget_chrome(self, p: QPainter):
         """Selection border + hover outline for widgets in edit mode."""
         if not self._widget_list:
@@ -636,6 +677,21 @@ class VideoCanvas(QWidget):
     def mousePressEvent(self, event):
         pos = event.position().toPoint()
         if self._widget_edit and event.button() == Qt.MouseButton.LeftButton:
+            # Resize takes priority: if the press lands on a border of the
+            # already-selected widget, drag that edge instead of moving.
+            sel = self._widget_selected
+            if 0 <= sel < len(self._widget_list):
+                edge = self._widget_resize_edge_at(
+                    self._widget_list[sel], pos.x(), pos.y())
+                if edge:
+                    w = self._widget_list[sel]
+                    self._widget_resize_idx = sel
+                    self._widget_resize_edge = edge
+                    self._resize_bounds = [w.x - w.w / 2, w.y - w.h / 2,
+                                           w.x + w.w / 2, w.y + w.h / 2]
+                    self.setCursor(self._resize_cursor(edge))
+                    self.update()
+                    return
             idx = self._widget_hit_test(pos.x(), pos.y())
             if idx != self._widget_selected:
                 self._widget_selected = idx
@@ -667,6 +723,25 @@ class VideoCanvas(QWidget):
     def mouseMoveEvent(self, event):
         pos = event.position().toPoint()
         if self._widget_edit:
+            # Active resize — drag one edge/corner, keep the opposite pinned.
+            if self._widget_resize_idx >= 0 and self._resize_bounds is not None:
+                src = self._widget_src_rect_px()
+                if src is not None and self._widget_resize_idx < len(self._widget_list):
+                    sx, sy, sw, sh = src
+                    ux = max(0.0, min(1.0, (pos.x() - sx) / sw))
+                    uy = max(0.0, min(1.0, (pos.y() - sy) / sh))
+                    l, t, r, b = self._resize_bounds
+                    e, MIN = self._widget_resize_edge, 0.03
+                    if "l" in e: l = min(ux, r - MIN)
+                    if "r" in e: r = max(ux, l + MIN)
+                    if "t" in e: t = min(uy, b - MIN)
+                    if "b" in e: b = max(uy, t + MIN)
+                    self._resize_bounds = [l, t, r, b]
+                    w = self._widget_list[self._widget_resize_idx]
+                    w.x, w.y, w.w, w.h = (l + r) / 2, (t + b) / 2, r - l, b - t
+                    self.widgetMoved.emit(self._widget_resize_idx, w.x, w.y, w.w, w.h)
+                    self.update()
+                return
             # Active drag — move the widget, normalise back to source coords,
             # emit a continuous move signal so the host can refresh the preview.
             if self._widget_drag_idx >= 0 and self._widget_drag_offset is not None:
@@ -691,7 +766,15 @@ class VideoCanvas(QWidget):
                     self.widgetMoved.emit(self._widget_drag_idx, nx, ny, w.w, w.h)
                     self.update()
                 return
-            # Hover — light dashed outline on whichever widget is under the cursor
+            # Hover — resize cursor on the selected widget's border wins, else
+            # a light dashed outline on whichever widget is under the cursor.
+            sel = self._widget_selected
+            if 0 <= sel < len(self._widget_list):
+                edge = self._widget_resize_edge_at(
+                    self._widget_list[sel], pos.x(), pos.y())
+                if edge:
+                    self.setCursor(self._resize_cursor(edge))
+                    return
             new_idx = self._widget_hit_test(pos.x(), pos.y())
             if new_idx != self._widget_hover:
                 self._widget_hover = new_idx
@@ -719,6 +802,17 @@ class VideoCanvas(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
+        if self._widget_edit and self._widget_resize_idx >= 0 \
+                and event.button() == Qt.MouseButton.LeftButton:
+            idx = self._widget_resize_idx
+            self._widget_resize_idx = -1
+            self._widget_resize_edge = None
+            self._resize_bounds = None
+            if 0 <= idx < len(self._widget_list):
+                w = self._widget_list[idx]
+                self.widgetCommit.emit(idx, w.x, w.y, w.w, w.h)
+            self.update()
+            return
         if self._widget_edit and self._widget_drag_idx >= 0 \
                 and event.button() == Qt.MouseButton.LeftButton:
             idx = self._widget_drag_idx
