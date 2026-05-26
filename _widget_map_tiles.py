@@ -199,11 +199,25 @@ def build_basemap(lats: list[float], lons: list[float], provider: str,
     max_zoom = PROVIDERS[provider]["max_zoom"]
     z = _choose_zoom(min_lat, max_lat, min_lon, max_lon, out_w, out_h, max_zoom)
 
-    # World-pixel bbox. North edge (max_lat) maps to the smaller y.
+    # World-pixel bbox of the (padded) track. North edge (max_lat) → smaller y.
     wx_min, wy_min = _lonlat_to_pixel(max_lat, min_lon, z)
     wx_max, wy_max = _lonlat_to_pixel(min_lat, max_lon, z)
     crop_w = max(1.0, wx_max - wx_min)
     crop_h = max(1.0, wy_max - wy_min)
+
+    # Expand the window to the widget's aspect ratio (around the track centre)
+    # so the basemap fills the whole widget — no transparent letterbox bars —
+    # while still fully containing the track. The extra area just shows more
+    # map context on the longer axis.
+    target = out_w / out_h
+    cx = (wx_min + wx_max) / 2.0
+    cy = (wy_min + wy_max) / 2.0
+    if crop_w / crop_h < target:
+        crop_w = crop_h * target
+    else:
+        crop_h = crop_w / target
+    wx_min, wx_max = cx - crop_w / 2.0, cx + crop_w / 2.0
+    wy_min, wy_max = cy - crop_h / 2.0, cy + crop_h / 2.0
 
     tx0, tx1 = int(wx_min // TILE_SIZE), int(wx_max // TILE_SIZE)
     ty0, ty1 = int(wy_min // TILE_SIZE), int(wy_max // TILE_SIZE)
@@ -232,26 +246,18 @@ def build_basemap(lats: list[float], lons: list[float], provider: str,
     if fetched == 0:
         return None
 
-    crop = stitch.crop((
-        int(round(wx_min - tx0 * TILE_SIZE)),
-        int(round(wy_min - ty0 * TILE_SIZE)),
-        int(round(wx_max - tx0 * TILE_SIZE)),
-        int(round(wy_max - ty0 * TILE_SIZE)),
-    ))
+    # Resample the exact (sub-pixel) window straight to the widget size. PIL's
+    # ``box`` takes a float source region, so the basemap fills out_w×out_h
+    # precisely and the track projector below lines up pixel-for-pixel.
+    box = (wx_min - tx0 * TILE_SIZE, wy_min - ty0 * TILE_SIZE,
+           wx_max - tx0 * TILE_SIZE, wy_max - ty0 * TILE_SIZE)
+    basemap = stitch.resize((out_w, out_h), Image.LANCZOS, box=box)
 
-    scale = min(out_w / crop_w, out_h / crop_h)
-    draw_w = max(1, int(round(crop_w * scale)))
-    draw_h = max(1, int(round(crop_h * scale)))
-    off_x = (out_w - draw_w) / 2.0
-    off_y = (out_h - draw_h) / 2.0
-
-    basemap = Image.new("RGBA", (out_w, out_h), (0, 0, 0, 0))
-    basemap.paste(crop.resize((draw_w, draw_h), Image.LANCZOS),
-                  (int(round(off_x)), int(round(off_y))))
+    sx = out_w / crop_w
+    sy = out_h / crop_h
 
     def to_px(lat: float, lon: float) -> tuple[float, float]:
         wx, wy = _lonlat_to_pixel(lat, lon, z)
-        return (off_x + (wx - wx_min) * scale,
-                off_y + (wy - wy_min) * scale)
+        return ((wx - wx_min) * sx, (wy - wy_min) * sy)
 
     return basemap, to_px

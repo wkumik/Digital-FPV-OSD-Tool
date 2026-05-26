@@ -1258,10 +1258,20 @@ class MainWindow(QMainWindow):
         wp.addWidget(self.wp_smoothness_spin, row, 2)
         row += 1
 
-        # Map underlay (map widgets only): draw a slippy-map basemap under the
-        # GPS track. Needs internet on first use; tiles are cached to disk.
-        self.wp_underlay_lbl = _lbl("Underlay")
-        wp.addWidget(self.wp_underlay_lbl, row, 0)
+        wgl.addWidget(self._wprops)
+
+        # ── Map section (collapsible) ────────────────────────────────────
+        # Map-specific controls live in their own group so they don't clutter
+        # the generic readout properties. Shown only when a GPS-map widget is
+        # selected (toggled in _apply_widget_to_props).
+        self._map_group = CollapsibleGroupBox("Map")
+        self._map_group.setStyleSheet(GROUP_STYLE)
+        mg = QGridLayout(self._map_group)
+        mg.setContentsMargins(10, 16, 10, 10)
+        mg.setHorizontalSpacing(6)
+        mg.setVerticalSpacing(4)
+
+        mg.addWidget(_lbl("Underlay"), 0, 0)
         self.wp_underlay = QComboBox()
         self.wp_underlay.addItem("None (track only)", "none")
         self.wp_underlay.addItem("Street map (OSM)",  "street")
@@ -1271,10 +1281,16 @@ class MainWindow(QMainWindow):
             "(cached for offline reuse); falls back to a plain background when "
             "offline.")
         self.wp_underlay.currentIndexChanged.connect(self._on_widget_prop_changed)
-        wp.addWidget(self.wp_underlay, row, 1, 1, 2)
-        row += 1
+        mg.addWidget(self.wp_underlay, 0, 1)
 
-        wgl.addWidget(self._wprops)
+        mnote = QLabel("Tiles download on first use and are cached for offline "
+                       "reuse. The map auto-zooms to the flight path.")
+        mnote.setStyleSheet(f"color:{t['muted']};font-size:{_fs(10)}px;")
+        mnote.setWordWrap(True)
+        mg.addWidget(mnote, 1, 0, 1, 2)
+
+        self._map_group.setVisible(False)
+        wgl.addWidget(self._map_group)
 
         wnote = QLabel("Widgets read live telemetry from the SRT track. "
                        "Toggle edit mode then drag on the preview to reposition.")
@@ -2739,10 +2755,8 @@ class MainWindow(QMainWindow):
         self.wp_max.setEnabled(not is_digital and not is_map)
         self.wp_smoothness.setEnabled(not is_digital and not is_map)
         self.wp_smoothness_spin.setEnabled(not is_digital and not is_map)
-        # Underlay applies only to the map; hide it for every other widget.
-        self.wp_underlay.setVisible(is_map)
-        self.wp_underlay_lbl.setVisible(is_map)
-        self.wp_underlay.setEnabled(is_map)
+        # The Map section is relevant only to the GPS-map widget.
+        self._map_group.setVisible(is_map)
         self._wprops.setEnabled(True)
 
     def _on_widget_edit_toggled(self, checked: bool):
