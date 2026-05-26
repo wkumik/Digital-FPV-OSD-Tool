@@ -1331,23 +1331,6 @@ class MainWindow(QMainWindow):
         mgl.addWidget(self.map_h, mrow, 1)
         mrow += 1
 
-        # Position (centre) — 0–100% of the video. Also draggable on the canvas.
-        mgl.addWidget(_lbl("Position X"), mrow, 0)
-        self.map_x = QSlider(Qt.Orientation.Horizontal)
-        self.map_x.setRange(0, 100)
-        self.map_x.setValue(50)
-        self.map_x.valueChanged.connect(self._on_map_pos_changed)
-        mgl.addWidget(self.map_x, mrow, 1)
-        mrow += 1
-
-        mgl.addWidget(_lbl("Position Y"), mrow, 0)
-        self.map_y = QSlider(Qt.Orientation.Horizontal)
-        self.map_y.setRange(0, 100)
-        self.map_y.setValue(50)
-        self.map_y.valueChanged.connect(self._on_map_pos_changed)
-        mgl.addWidget(self.map_y, mrow, 1)
-        mrow += 1
-
         mnote = QLabel("Plots the GPS flight path. Tiles download on first use "
                        "and are cached offline; the map auto-zooms to the path. "
                        "Drag to reposition with “Edit on canvas”.")
@@ -3015,13 +2998,9 @@ class MainWindow(QMainWindow):
             self.map_underlay.setCurrentIndex(ui if ui >= 0 else 0)
             self.map_w.setValue(max(5, min(100, int(round(mw.w * 100)))))
             self.map_h.setValue(max(5, min(100, int(round(mw.h * 100)))))
-            self.map_x.setValue(max(0, min(100, int(round(mw.x * 100)))))
-            self.map_y.setValue(max(0, min(100, int(round(mw.y * 100)))))
-        for ctrl in (self.map_show_chk, self.map_underlay, self.map_w,
-                     self.map_h, self.map_x, self.map_y):
+        for ctrl in (self.map_show_chk, self.map_underlay, self.map_w, self.map_h):
             ctrl.blockSignals(False)
-        for ctrl in (self.map_underlay, self.map_w, self.map_h,
-                     self.map_x, self.map_y, self.map_edit_btn):
+        for ctrl in (self.map_underlay, self.map_w, self.map_h, self.map_edit_btn):
             ctrl.setEnabled(mw is not None)
 
     def _on_map_show_toggled(self, checked: bool):
@@ -3056,18 +3035,6 @@ class MainWindow(QMainWindow):
             return
         mw.w = max(0.05, min(1.0, self.map_w.value() / 100.0))
         mw.h = max(0.05, min(1.0, self.map_h.value() / 100.0))
-        pp = getattr(self, "_player_panel", None)
-        if pp is not None:
-            pp.canvas.set_widgets(self._widgets)
-        self._save_widget_settings()
-        self._refresh_preview()
-
-    def _on_map_pos_changed(self, *_):
-        mw = self._map_widget()
-        if mw is None:
-            return
-        mw.x = max(0.0, min(1.0, self.map_x.value() / 100.0))
-        mw.y = max(0.0, min(1.0, self.map_y.value() / 100.0))
         pp = getattr(self, "_player_panel", None)
         if pp is not None:
             pp.canvas.set_widgets(self._widgets)
