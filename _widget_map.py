@@ -14,11 +14,14 @@ Not part of the public API — imported by widgets.py only.
 from __future__ import annotations
 
 import math
+import os
 import time
 from typing import Any, Optional
 
+import numpy as np
+
 try:
-    from PIL import Image, ImageDraw, ImageChops, ImageFont
+    from PIL import Image, ImageDraw, ImageChops
     PIL_OK = True
 except ImportError:
     PIL_OK = False
@@ -28,7 +31,7 @@ from osd_decoder import (
     extract_plus_code as _extract_plus_code,
     extract_gps_coords as _extract_gps_coords,
 )
-from _widget_primitives import _parse_color, _font
+from _widget_primitives import _parse_color, _font, _polar
 from _widget_map_tiles import (
     build_basemap as _build_basemap,
     is_underlay as _is_underlay,
@@ -207,6 +210,58 @@ def _current_position(telemetry: Any) -> Optional[tuple[float, float]]:
     return None
 
 
+# ----- Heading ----------------------------------------------------------------
+
+def _compute_heading(cur: tuple[float, float],
+                     track_ll: list[tuple[float, float]]) -> Optional[float]:
+    """Return the bearing (degrees from north, clockwise) of travel at ``cur``.
+
+    Finds the two nearest track points bracketing the current position and
+    computes the forward azimuth between them. Returns None when the track
+    is too short or the points are too close to determine direction.
+    """
+    if not track_ll or len(track_ll) < 2:
+        return None
+    # Find the track point closest to cur.
+    cur_lat, cur_lon = cur
+    best_i = 0
+    best_d2 = float("inf")
+    for i, (lat, lon) in enumerate(track_ll):
+        d2 = (lat - cur_lat) ** 2 + (lon - cur_lon) ** 2
+        if d2 < best_d2:
+            best_d2 = d2
+            best_i = i
+    # Bracket: one point behind, one ahead (or either side of best_i).
+    prev_i = max(0, best_i - 1)
+    next_i = min(len(track_ll) - 1, best_i + 1)
+    if prev_i == next_i:
+        return None
+    lat1, lon1 = track_ll[prev_i]
+    lat2, lon2 = track_ll[next_i]
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    # Only trust bearing when the points are far enough apart.
+    if abs(dlat) < 1e-8 and abs(dlon) < 1e-8:
+        if best_i > 0:
+            lat1, lon1 = track_ll[best_i - 1]
+        elif best_i + 1 < len(track_ll):
+            lat1, lon1 = track_ll[best_i]
+            lat2, lon2 = track_ll[best_i + 1]
+        else:
+            return None
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+    if abs(dlat) < 1e-8 and abs(dlon) < 1e-8:
+        return None
+    lat1_r, lat2_r = math.radians(lat1), math.radians(lat2)
+    dlon_r = math.radians(dlon)
+    y = math.sin(dlon_r) * math.cos(lat2_r)
+    x = (math.cos(lat1_r) * math.sin(lat2_r)
+         - math.sin(lat1_r) * math.cos(lat2_r) * math.cos(dlon_r))
+    deg = math.degrees(math.atan2(y, x))
+    return (deg + 360.0) % 360.0
+
+
 # ----- Trace smoothing -------------------------------------------------------
 
 def _smooth_track(pts: list[tuple[float, float]],
@@ -313,6 +368,96 @@ def _draw_attribution(patch: Any, text: str, pw: int, ph: int, SS: int) -> None:
     d.text((x, y), text, fill=(255, 255, 255, 210), font=font)
 
 
+# ----- Marker drawing ---------------------------------------------------------
+
+def _draw_marker_dot(pdraw: Any, cx: float, cy: float, r: int,
+                     color: tuple, SS: int) -> None:
+    """Filled circle with a white halo — the original marker style."""
+    halo_r = r + max(1 * SS, int(r * 0.35))
+    pdraw.ellipse([cx - halo_r, cy - halo_r, cx + halo_r, cy + halo_r],
+                  fill=(255, 255, 255, 180))
+    pdraw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=color)
+
+
+def _draw_marker_quadcopter(pdraw: Any, cx: float, cy: float, r: int,
+                            color: tuple, SS: int) -> None:
+    """Small quadcopter icon: central body, four arms, four motor circles."""
+    arm_len = r * 1.8
+    arm_w   = max(1 * SS, int(r * 0.22))
+    motor_r = max(1.5 * SS, r * 0.28)
+    body_rx = r * 0.42
+    body_ry = r * 0.30
+
+    angles = [45, 135, 225, 315]
+    # Arms
+    for a in angles:
+        ex, ey = _polar(cx, cy, arm_len, a)
+        pdraw.line([(cx, cy), (ex, ey)], fill=color, width=arm_w)
+    # Motors
+    motor_color = (min(255, color[0] + 60), min(255, color[1] + 60),
+                   min(255, color[2] + 60), color[3])
+    for a in angles:
+        mx, my = _polar(cx, cy, arm_len, a)
+        pdraw.ellipse([mx - motor_r, my - motor_r,
+                       mx + motor_r, my + motor_r], fill=motor_color)
+    # Body
+    pdraw.ellipse([cx - body_rx, cy - body_ry, cx + body_rx, cy + body_ry],
+                  fill=color)
+
+
+_PLANE_ICON: Any = None
+
+
+def _plane_icon():
+    global _PLANE_ICON
+    if _PLANE_ICON is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "assets", "plane_marker.png")
+        try:
+            _PLANE_ICON = Image.open(path).convert("RGB")
+        except Exception:
+            _PLANE_ICON = False
+    return _PLANE_ICON if _PLANE_ICON else None
+
+
+def _draw_marker_plane(pdraw: Any, cx: float, cy: float, r: int,
+                       color: tuple, heading: float, SS: int) -> None:
+    """Plane marker loaded from assets/plane_marker.png, rotated to heading.
+
+    Nose points UP in the source image.  White background is made transparent
+    and the plane is tinted red.
+    """
+    icon = _plane_icon()
+    if icon is None:
+        _draw_marker_dot(pdraw, cx, cy, r, color, SS)
+        return
+
+    icon_size = max(8 * SS, int(r * 5))
+    iw, ih = icon.size
+    scale = icon_size / max(iw, ih)
+    new_w = max(1, int(iw * scale))
+    new_h = max(1, int(ih * scale))
+    scaled = icon.resize((new_w, new_h), Image.LANCZOS)
+
+    # Make white background transparent, tint the plane red.
+    arr = np.array(scaled).astype(np.float32)
+    whiteness = arr.min(axis=2)  # how white each pixel is
+    alpha = np.clip((255.0 - whiteness) / 60.0, 0.0, 1.0)
+    alpha = alpha * (color[3] / 255.0)
+    red = (220, 40, 40)
+    out = np.zeros((new_h, new_w, 4), dtype=np.float32)
+    for ch in range(3):
+        out[:, :, ch] = alpha * red[ch]
+    out[:, :, 3] = alpha * 255.0
+    tinted = Image.fromarray(out.clip(0, 255).astype(np.uint8), "RGBA")
+
+    angle = -heading
+    rotated = tinted.rotate(angle, Image.BICUBIC, expand=True,
+                            fillcolor=(0, 0, 0, 0))
+    rw, rh = rotated.size
+    pdraw._image.paste(rotated, (int(cx - rw / 2.0), int(cy - rh / 2.0)), rotated)
+
+
 # ----- Draw ------------------------------------------------------------------
 
 def _draw_map(img: Any, w: Any, telemetry: Any,
@@ -349,6 +494,7 @@ def _draw_map(img: Any, w: Any, telemetry: Any,
     padding_frac = max(0.0, min(0.25, float(style.get("padding", 0.08))))
     trace_w_pct  = float(style.get("trace_width", 0.012))
     marker_pct   = float(style.get("marker_size", 0.035))
+    marker_shape = str(style.get("marker_shape", "dot"))
     underlay     = str(style.get("map_underlay", "none"))
 
     SS = max(1, int(style.get("supersample", 3)))
@@ -426,10 +572,16 @@ def _draw_map(img: Any, w: Any, telemetry: Any,
     if cur is not None:
         mx, my = project(cur[0], cur[1])
         mr     = max(2 * SS, int(min(pw, ph) * marker_pct))
-        halo_r = mr + max(1 * SS, int(mr * 0.35))
-        pdraw.ellipse([mx - halo_r, my - halo_r, mx + halo_r, my + halo_r],
-                      fill=(255, 255, 255, 180))
-        pdraw.ellipse([mx - mr, my - mr, mx + mr, my + mr], fill=marker_color)
+
+        if marker_shape == "quadcopter":
+            _draw_marker_quadcopter(pdraw, mx, my, mr, marker_color, SS)
+        elif marker_shape == "plane":
+            heading = _compute_heading(cur, track_ll)
+            if heading is None:
+                heading = 0.0
+            _draw_marker_plane(pdraw, mx, my, mr, marker_color, heading, SS)
+        else:
+            _draw_marker_dot(pdraw, mx, my, mr, marker_color, SS)
 
     # Border last so it frames the basemap cleanly.
     if border_color[3] > 0:

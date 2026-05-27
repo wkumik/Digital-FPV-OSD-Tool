@@ -1331,6 +1331,15 @@ class MainWindow(QMainWindow):
         mgl.addWidget(self.map_h, mrow, 1)
         mrow += 1
 
+        mgl.addWidget(_lbl("Marker"), mrow, 0)
+        self.map_marker = QComboBox()
+        self.map_marker.addItem("Dot",        "dot")
+        self.map_marker.addItem("Quadcopter", "quadcopter")
+        self.map_marker.addItem("Plane",      "plane")
+        self.map_marker.currentIndexChanged.connect(self._on_map_marker_changed)
+        mgl.addWidget(self.map_marker, mrow, 1)
+        mrow += 1
+
         mnote = QLabel("Plots the GPS flight path. Tiles download on first use "
                        "and are cached offline; the map auto-zooms to the path. "
                        "Drag to reposition with “Edit on canvas”.")
@@ -2990,7 +2999,8 @@ class MainWindow(QMainWindow):
         for ctrl, on in ((self.map_show_chk, True),
                          (self.map_underlay, mw is not None),
                          (self.map_w, mw is not None),
-                         (self.map_h, mw is not None)):
+                         (self.map_h, mw is not None),
+                         (self.map_marker, mw is not None)):
             ctrl.blockSignals(True)
         self.map_show_chk.setChecked(mw is not None)
         if mw is not None:
@@ -2998,9 +3008,13 @@ class MainWindow(QMainWindow):
             self.map_underlay.setCurrentIndex(ui if ui >= 0 else 0)
             self.map_w.setValue(max(5, min(100, int(round(mw.w * 100)))))
             self.map_h.setValue(max(5, min(100, int(round(mw.h * 100)))))
-        for ctrl in (self.map_show_chk, self.map_underlay, self.map_w, self.map_h):
+            mi = self.map_marker.findData(str(mw.style.get("marker_shape", "dot")))
+            self.map_marker.setCurrentIndex(mi if mi >= 0 else 0)
+        for ctrl in (self.map_show_chk, self.map_underlay, self.map_w, self.map_h,
+                     self.map_marker):
             ctrl.blockSignals(False)
-        for ctrl in (self.map_underlay, self.map_w, self.map_h, self.map_edit_btn):
+        for ctrl in (self.map_underlay, self.map_w, self.map_h, self.map_edit_btn,
+                     self.map_marker):
             ctrl.setEnabled(mw is not None)
 
     def _on_map_show_toggled(self, checked: bool):
@@ -3041,16 +3055,26 @@ class MainWindow(QMainWindow):
         self._save_widget_settings()
         self._refresh_preview()
 
-    def _on_map_edit_position(self):
-        """Unlock the map for dragging/resizing on the canvas and select it."""
+    def _on_map_marker_changed(self, *_):
         mw = self._map_widget()
         if mw is None:
             return
-        if not self.widget_edit_btn.isChecked():
-            self.widget_edit_btn.setChecked(True)   # turns on canvas edit mode
-        pp = getattr(self, "_player_panel", None)
-        if pp is not None:
-            pp.canvas.set_widget_selected(self._widgets.index(mw))
+        mw.style["marker_shape"] = self.map_marker.currentData() or "dot"
+        self._save_widget_settings()
+        self._refresh_preview()
+
+    def _on_map_edit_position(self):
+        """Toggle canvas edit mode for the map widget (drag/resize)."""
+        mw = self._map_widget()
+        if mw is None:
+            return
+        if self.widget_edit_btn.isChecked():
+            self.widget_edit_btn.setChecked(False)  # turn off canvas edit mode
+        else:
+            self.widget_edit_btn.setChecked(True)   # turn on canvas edit mode
+            pp = getattr(self, "_player_panel", None)
+            if pp is not None:
+                pp.canvas.set_widget_selected(self._widgets.index(mw))
         self._refresh_preview()
 
     def _on_widget_diagnose(self):
