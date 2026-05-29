@@ -1086,14 +1086,16 @@ class MainWindow(QMainWindow):
         wgl.setSpacing(4)
         wgl.setContentsMargins(10, 16, 10, 10)
 
-        # Edit-mode toggle — when on, the canvas draws selection chrome and
-        # captures mouse drags so widgets can be repositioned.
-        self.widget_edit_btn = QPushButton("✎  Edit on canvas")
+        # Unified edit/lock toggle — when unlocked, the canvas draws selection
+        # chrome and captures mouse drags so ANY widget (custom widgets and the
+        # GPS map alike) can be repositioned/resized directly on the preview.
+        self.widget_edit_btn = QPushButton("🔒  Layout locked")
         self.widget_edit_btn.setCheckable(True)
         self.widget_edit_btn.setStyleSheet(BTN_SEC)
         self.widget_edit_btn.setFixedHeight(26)
         self.widget_edit_btn.setToolTip(
-            "Toggle edit mode. When on, drag widgets directly on the video preview.")
+            "Unlock the layout to drag and resize widgets — including the GPS "
+            "map — directly on the video preview. Click again to lock.")
         self.widget_edit_btn.toggled.connect(self._on_widget_edit_toggled)
         wgl.addWidget(self.widget_edit_btn)
 
@@ -1283,21 +1285,31 @@ class MainWindow(QMainWindow):
         mgl.setHorizontalSpacing(6)
         mgl.setVerticalSpacing(4)
 
+        def _section(text):
+            """A small uppercase sub-heading inside the map box."""
+            l = QLabel(text)
+            l.setStyleSheet(
+                f"color:{t['subtext']};font-size:{_fs(9)}px;font-weight:700;"
+                f"letter-spacing:1px;padding-top:4px;")
+            return l
+
         mrow = 0
-        self.map_show_chk = QCheckBox("Show map overlay")
-        self.map_show_chk.setStyleSheet(f"QCheckBox{{color:{t['text']};}}")
-        self.map_show_chk.toggled.connect(self._on_map_show_toggled)
-        mgl.addWidget(self.map_show_chk, mrow, 0, 1, 2)
+        # Eye toggle: show / hide the map overlay (adds/removes the map widget).
+        # Positioning is handled by the unified "Edit layout" toggle in the
+        # Custom Widgets box — the map is just a widget, so it's dragged and
+        # resized on the canvas like any other.
+        self.map_show_btn = QPushButton("🙈  Map hidden")
+        self.map_show_btn.setCheckable(True)
+        self.map_show_btn.setStyleSheet(BTN_SEC)
+        self.map_show_btn.setFixedHeight(28)
+        self.map_show_btn.setToolTip(
+            "Show or hide the GPS map overlay on the video.")
+        self.map_show_btn.toggled.connect(self._on_map_show_toggled)
+        mgl.addWidget(self.map_show_btn, mrow, 0, 1, 2)
         mrow += 1
 
-        self.map_edit_btn = QPushButton("✎  Edit position (drag on video)")
-        self.map_edit_btn.setStyleSheet(BTN_SEC)
-        self.map_edit_btn.setFixedHeight(26)
-        self.map_edit_btn.setToolTip(
-            "Unlock the map so you can drag it on the video preview, and drag "
-            "its edges/corners to resize.")
-        self.map_edit_btn.clicked.connect(self._on_map_edit_position)
-        mgl.addWidget(self.map_edit_btn, mrow, 0, 1, 2)
+        # ── Appearance ──────────────────────────────────────────────────
+        mgl.addWidget(_section("APPEARANCE"), mrow, 0, 1, 2)
         mrow += 1
 
         mgl.addWidget(_lbl("Underlay"), mrow, 0)
@@ -1311,6 +1323,22 @@ class MainWindow(QMainWindow):
             "offline.")
         self.map_underlay.currentIndexChanged.connect(self._on_map_underlay_changed)
         mgl.addWidget(self.map_underlay, mrow, 1)
+        mrow += 1
+
+        mgl.addWidget(_lbl("Marker"), mrow, 0)
+        self.map_marker = QComboBox()
+        self.map_marker.addItem("Dot",        "dot")
+        self.map_marker.addItem("Quadcopter", "quadcopter")
+        self.map_marker.addItem("Plane",      "plane")
+        self.map_marker.setToolTip(
+            "Shape drawn at the craft's current position. Plane rotates to "
+            "match heading.")
+        self.map_marker.currentIndexChanged.connect(self._on_map_marker_changed)
+        mgl.addWidget(self.map_marker, mrow, 1)
+        mrow += 1
+
+        # ── Size & position ─────────────────────────────────────────────
+        mgl.addWidget(_section("SIZE & POSITION"), mrow, 0, 1, 2)
         mrow += 1
 
         # Size sliders run the full 5–100%: at 100% the map matches the video
@@ -1331,18 +1359,9 @@ class MainWindow(QMainWindow):
         mgl.addWidget(self.map_h, mrow, 1)
         mrow += 1
 
-        mgl.addWidget(_lbl("Marker"), mrow, 0)
-        self.map_marker = QComboBox()
-        self.map_marker.addItem("Dot",        "dot")
-        self.map_marker.addItem("Quadcopter", "quadcopter")
-        self.map_marker.addItem("Plane",      "plane")
-        self.map_marker.currentIndexChanged.connect(self._on_map_marker_changed)
-        mgl.addWidget(self.map_marker, mrow, 1)
-        mrow += 1
-
-        mnote = QLabel("Plots the GPS flight path. Tiles download on first use "
-                       "and are cached offline; the map auto-zooms to the path. "
-                       "Drag to reposition with “Edit on canvas”.")
+        mnote = QLabel("Tiles download on first use and are cached offline; "
+                       "the map auto-zooms to the path. Reposition it with "
+                       "“Layout locked/unlocked” in Custom Widgets.")
         mnote.setStyleSheet(f"color:{t['muted']};font-size:{_fs(10)}px;")
         mnote.setWordWrap(True)
         mgl.addWidget(mnote, mrow, 0, 1, 2)
@@ -2284,6 +2303,7 @@ class MainWindow(QMainWindow):
         # checkable "Edit on canvas" / hide toggles and the font downloader.
         for _b in (self.widget_add_btn, self.widget_remove_btn,
                    self.widget_diag_btn, self.wp_color_btn, self.widget_edit_btn,
+                   self.map_show_btn,
                    self.hide_add_btn, self.hide_remove_btn, self.hide_clear_btn,
                    self._download_fonts_btn):
             _b.setStyleSheet(BTN_SEC)
@@ -2848,8 +2868,8 @@ class MainWindow(QMainWindow):
         if pp is None:
             return
         pp.canvas.set_widget_edit(checked)
-        self.widget_edit_btn.setText("✎  Editing… (click to finish)" if checked
-                                     else "✎  Edit on canvas")
+        self.widget_edit_btn.setText("🔓  Layout unlocked (click to lock)" if checked
+                                     else "🔒  Layout locked")
         # Refresh once so widgets that need a current frame to compute their
         # rect get a chance to render.
         self._refresh_preview()
@@ -2991,18 +3011,18 @@ class MainWindow(QMainWindow):
 
     def _refresh_map_box(self):
         """Sync the GPS Map box to the current map widget + GPS availability."""
-        if not hasattr(self, "map_show_chk"):
+        if not hasattr(self, "map_show_btn"):
             return
         avail = self._gps_track_available()
         mw = self._map_widget()
         self.map_group.setEnabled(avail)
-        for ctrl, on in ((self.map_show_chk, True),
-                         (self.map_underlay, mw is not None),
-                         (self.map_w, mw is not None),
-                         (self.map_h, mw is not None),
-                         (self.map_marker, mw is not None)):
+        synced = (self.map_show_btn, self.map_underlay, self.map_w, self.map_h,
+                  self.map_marker)
+        for ctrl in synced:
             ctrl.blockSignals(True)
-        self.map_show_chk.setChecked(mw is not None)
+        shown = mw is not None
+        self.map_show_btn.setChecked(shown)
+        self.map_show_btn.setText("👁  Map shown" if shown else "🙈  Map hidden")
         if mw is not None:
             ui = self.map_underlay.findData(str(mw.style.get("map_underlay", "none")))
             self.map_underlay.setCurrentIndex(ui if ui >= 0 else 0)
@@ -3010,11 +3030,9 @@ class MainWindow(QMainWindow):
             self.map_h.setValue(max(5, min(100, int(round(mw.h * 100)))))
             mi = self.map_marker.findData(str(mw.style.get("marker_shape", "dot")))
             self.map_marker.setCurrentIndex(mi if mi >= 0 else 0)
-        for ctrl in (self.map_show_chk, self.map_underlay, self.map_w, self.map_h,
-                     self.map_marker):
+        for ctrl in synced:
             ctrl.blockSignals(False)
-        for ctrl in (self.map_underlay, self.map_w, self.map_h, self.map_edit_btn,
-                     self.map_marker):
+        for ctrl in (self.map_underlay, self.map_w, self.map_h, self.map_marker):
             ctrl.setEnabled(mw is not None)
 
     def _on_map_show_toggled(self, checked: bool):
@@ -3028,6 +3046,7 @@ class MainWindow(QMainWindow):
                 style={"color": "#FFFFFF", "map_underlay": underlay}))
         elif not checked and mw is not None:
             self._widgets.remove(mw)
+        self.map_show_btn.setText("👁  Map shown" if checked else "🙈  Map hidden")
         self._refresh_widget_list()
         self._save_widget_settings()
         self._refresh_preview()
@@ -3061,20 +3080,6 @@ class MainWindow(QMainWindow):
             return
         mw.style["marker_shape"] = self.map_marker.currentData() or "dot"
         self._save_widget_settings()
-        self._refresh_preview()
-
-    def _on_map_edit_position(self):
-        """Toggle canvas edit mode for the map widget (drag/resize)."""
-        mw = self._map_widget()
-        if mw is None:
-            return
-        if self.widget_edit_btn.isChecked():
-            self.widget_edit_btn.setChecked(False)  # turn off canvas edit mode
-        else:
-            self.widget_edit_btn.setChecked(True)   # turn on canvas edit mode
-            pp = getattr(self, "_player_panel", None)
-            if pp is not None:
-                pp.canvas.set_widget_selected(self._widgets.index(mw))
         self._refresh_preview()
 
     def _on_widget_diagnose(self):
