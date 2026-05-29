@@ -137,9 +137,12 @@ icon and text, give the label leading spaces so the icon has room: `QPushButton(
   tolerated holdovers, not patterns to copy — prefer a PNG icon for anything new.
 - Available icons in `icons/`: `back, error, folder, gear, moon-dark, moon-light,
   next, pause, play, render, rewind, save, settings, stop, video, wifi, wifi2` (`.png`).
-  If a control needs an icon that isn't there (lock/unlock, eye/eye-off, …), **add a
-  new PNG to `icons/` in the same flat monochrome style** (retintable via `_icon()`'s
-  `color` arg) rather than substituting an emoji or unicode glyph.
+  If a control needs an icon that isn't there, **add a new PNG to `icons/`** rather
+  than substituting an emoji or unicode glyph.
+- **Source new icons from [Lucide](https://lucide.dev/icons)** — flat monochrome
+  line icons that match the existing set and retint cleanly via `_icon()`'s `color`
+  arg. Export at a consistent size and pad to the same content fraction as the
+  existing icons (~0.97 of the canvas) so they render at the same visual scale.
 
 **Button styling: use the shared constants.** Every button's `setStyleSheet` takes a
 module-level style string: `BTN_SEC` (default), `BTN_PRIMARY`, `BTN_PLAY`, `BTN_STOP`,
