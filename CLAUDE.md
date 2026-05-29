@@ -120,3 +120,39 @@ main.py (PyQt6 GUI — MainWindow, FileRow, LabeledSlider, RenderBar)
 - All `.py` files include an SPDX license header and copyright line
 - UI classes use PyQt6 naming conventions (camelCase methods), while data/logic modules use snake_case
 - Caching is aggressive: projection results, visual tracks, basemaps, and slim-digit maps are all cached by identity or content hash, with weakref-based eviction for per-file caches
+
+## UI Style Guidelines (PyQt6)
+
+Match the existing look — read a nearby control and copy its pattern before adding a new one.
+
+**Icons: use PNG assets via the `_icon()` helper, never emoji.** The canonical pattern
+is `btn.setIcon(_icon("render.png", 18))` — `_icon(name, size, color=None)` (`main.py:217`)
+loads a PNG from `icons/` and can retint it to a theme colour. For a button with both
+icon and text, give the label leading spaces so the icon has room: `QPushButton("  Render Video")`
+(see `render_btn`, `stop_btn`, and the player transport buttons in `player.py`).
+- **Do NOT put emoji in button/label text** (🔒 👁 🙈 ✎ 🔍 🎨 etc.). They render
+  inconsistently across platforms and clash with the PNG icon set. Plain ASCII/text
+  labels are fine; iconography must come from `icons/`.
+- A few legacy unicode glyphs exist (`＋ Add`, `− Remove`, `↺ Reset`, `✕`). These are
+  tolerated holdovers, not patterns to copy — prefer a PNG icon for anything new.
+- Available icons in `icons/`: `back, error, folder, gear, moon-dark, moon-light,
+  next, pause, play, render, rewind, save, settings, stop, video, wifi, wifi2` (`.png`).
+  If a control needs an icon that isn't there (lock/unlock, eye/eye-off, …), **add a
+  new PNG to `icons/` in the same flat monochrome style** (retintable via `_icon()`'s
+  `color` arg) rather than substituting an emoji or unicode glyph.
+
+**Button styling: use the shared constants.** Every button's `setStyleSheet` takes a
+module-level style string: `BTN_SEC` (default), `BTN_PRIMARY`, `BTN_PLAY`, `BTN_STOP`,
+`BTN_DANGER`. Don't hand-roll per-button CSS. Any `BTN_SEC` button must also be listed
+in the theme-restyle loop in `_apply_theme()` (the `for _b in (...)` block) or it keeps
+the stale palette when the user switches light/dark; icon buttons get their icon
+re-applied there too so retinting follows the theme.
+
+**Sizing & layout.** Group boxes use `CollapsibleGroupBox` + `GROUP_STYLE`, content
+margins `(10, 16, 10, 10)`, `setSpacing(4)`. Use the local `_lbl()` helper for field
+labels and `_fs()` for all font sizes (never hard-code px) so they scale with the UI
+scale setting.
+
+**State sync.** When a `_refresh_*` method programmatically updates a control that has a
+connected signal, wrap the update in `blockSignals(True)/(False)` so it doesn't re-fire
+handlers — see `_refresh_map_box()`.
