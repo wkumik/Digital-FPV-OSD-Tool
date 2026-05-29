@@ -1089,10 +1089,11 @@ class MainWindow(QMainWindow):
         # Unified edit/lock toggle — when unlocked, the canvas draws selection
         # chrome and captures mouse drags so ANY widget (custom widgets and the
         # GPS map alike) can be repositioned/resized directly on the preview.
-        self.widget_edit_btn = QPushButton("🔒  Layout locked")
+        self.widget_edit_btn = QPushButton("  Layout locked")
         self.widget_edit_btn.setCheckable(True)
         self.widget_edit_btn.setStyleSheet(BTN_SEC)
         self.widget_edit_btn.setFixedHeight(26)
+        self.widget_edit_btn.setIcon(_icon("lock.png", 16))
         self.widget_edit_btn.setToolTip(
             "Unlock the layout to drag and resize widgets — including the GPS "
             "map — directly on the video preview. Click again to lock.")
@@ -1298,10 +1299,11 @@ class MainWindow(QMainWindow):
         # Positioning is handled by the unified "Edit layout" toggle in the
         # Custom Widgets box — the map is just a widget, so it's dragged and
         # resized on the canvas like any other.
-        self.map_show_btn = QPushButton("🙈  Map hidden")
+        self.map_show_btn = QPushButton("  Map hidden")
         self.map_show_btn.setCheckable(True)
         self.map_show_btn.setStyleSheet(BTN_SEC)
         self.map_show_btn.setFixedHeight(28)
+        self.map_show_btn.setIcon(_icon("eye-closed.png", 16))
         self.map_show_btn.setToolTip(
             "Show or hide the GPS map overlay on the video.")
         self.map_show_btn.toggled.connect(self._on_map_show_toggled)
@@ -2307,6 +2309,14 @@ class MainWindow(QMainWindow):
                    self.hide_add_btn, self.hide_remove_btn, self.hide_clear_btn,
                    self._download_fonts_btn):
             _b.setStyleSheet(BTN_SEC)
+        # Re-tint the stateful icon buttons to the new theme's icon colour,
+        # picking the glyph that matches each button's current toggle state.
+        self.widget_edit_btn.setIcon(
+            _icon("lock-open.png" if self.widget_edit_btn.isChecked()
+                  else "lock.png", 16))
+        self.map_show_btn.setIcon(
+            _icon("eye.png" if self.map_show_btn.isChecked()
+                  else "eye-closed.png", 16))
         # Gauge list (styled with theme tokens only at construction).
         self.widget_list.setStyleSheet(
             f"QListWidget{{background:{t['bg2']};color:{t['text']};"
@@ -2868,8 +2878,9 @@ class MainWindow(QMainWindow):
         if pp is None:
             return
         pp.canvas.set_widget_edit(checked)
-        self.widget_edit_btn.setText("🔓  Layout unlocked (click to lock)" if checked
-                                     else "🔒  Layout locked")
+        self.widget_edit_btn.setText("  Layout unlocked (click to lock)" if checked
+                                     else "  Layout locked")
+        self.widget_edit_btn.setIcon(_icon("lock-open.png" if checked else "lock.png", 16))
         # Refresh once so widgets that need a current frame to compute their
         # rect get a chance to render.
         self._refresh_preview()
@@ -3022,7 +3033,8 @@ class MainWindow(QMainWindow):
             ctrl.blockSignals(True)
         shown = mw is not None
         self.map_show_btn.setChecked(shown)
-        self.map_show_btn.setText("👁  Map shown" if shown else "🙈  Map hidden")
+        self.map_show_btn.setText("  Map shown" if shown else "  Map hidden")
+        self.map_show_btn.setIcon(_icon("eye.png" if shown else "eye-closed.png", 16))
         if mw is not None:
             ui = self.map_underlay.findData(str(mw.style.get("map_underlay", "none")))
             self.map_underlay.setCurrentIndex(ui if ui >= 0 else 0)
@@ -3046,7 +3058,8 @@ class MainWindow(QMainWindow):
                 style={"color": "#FFFFFF", "map_underlay": underlay}))
         elif not checked and mw is not None:
             self._widgets.remove(mw)
-        self.map_show_btn.setText("👁  Map shown" if checked else "🙈  Map hidden")
+        self.map_show_btn.setText("  Map shown" if checked else "  Map hidden")
+        self.map_show_btn.setIcon(_icon("eye.png" if checked else "eye-closed.png", 16))
         self._refresh_widget_list()
         self._save_widget_settings()
         self._refresh_preview()
