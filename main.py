@@ -63,7 +63,7 @@ _DARK_THEME = True   # module-level flag; toggled by the theme button
 
 # ─── Version & UI scale ───────────────────────────────────────────────────────
 
-VERSION = "1.7.3"
+VERSION = "1.8.0"
 
 _UI_SCALE = 1.0
 _SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
@@ -375,7 +375,7 @@ class DropZone(QFrame):
         self.setMinimumHeight(72)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 8, 8, 8)
-        self._lbl = QLabel("Drop  .mp4 · .osd · .srt  here")
+        self._lbl = QLabel("Drop  .mp4 · .ts · .osd · .srt  here")
         self._lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl.setStyleSheet(f"color:{_T()['muted']};font-size:11px;")
         lay.addWidget(self._lbl)
@@ -398,7 +398,7 @@ class DropZone(QFrame):
     def refresh_theme(self):
         self._update_idle()
 
-    _VALID_EXTS = {'.mp4', '.mkv', '.avi', '.mov', '.osd', '.srt'}
+    _VALID_EXTS = {'.mp4', '.ts', '.mkv', '.avi', '.mov', '.osd', '.srt'}
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -956,7 +956,7 @@ class MainWindow(QMainWindow):
         self.drop_zone.file_dropped.connect(self._on_file_dropped)
         fgl.addWidget(self.drop_zone)
 
-        self.video_row = FileRow("Video",  "Select video…",  "Video (*.mp4 *.mkv *.avi *.mov)",
+        self.video_row = FileRow("Video",  "Select video…",  "Video (*.mp4 *.ts *.mkv *.avi *.mov)",
                                  icon=_icon("video.png", 16), icon_name="video.png")
         self.osd_row   = FileRow("OSD",    "Auto-detected",  "OSD (*.osd)",
                                  icon=_icon("gear.png",  16), icon_name="gear.png")
@@ -2132,7 +2132,7 @@ class MainWindow(QMainWindow):
 
     def _on_file_dropped(self, path):
         ext = os.path.splitext(path)[1].lower()
-        if ext in ('.mp4', '.mkv', '.avi', '.mov'):
+        if ext in ('.mp4', '.ts', '.mkv', '.avi', '.mov'):
             self.video_row.set_path(path)
             # Clear companion data from the previous flight so the map
             # doesn't show a stale track if the new video has no .srt/.osd.
@@ -2152,27 +2152,33 @@ class MainWindow(QMainWindow):
     def _auto_detect(self, base_path):
         p = Path(base_path); stem = p.stem; dirp = p.parent
         ext = p.suffix.lower()
-        candidates = {
-            '.osd': dirp / (stem + ".osd"),
-            '.srt': dirp / (stem + ".srt"),
-            '.mp4': dirp / (stem + ".mp4"),
-        }
-        if ext == '.mp4':
-            if candidates['.osd'].exists():
-                self._load_osd(str(candidates['.osd']))
+        osd_c = dirp / (stem + ".osd")
+        srt_c = dirp / (stem + ".srt")
+        # Video companion: first matching container that exists on disk. .mp4
+        # is preferred (most reliable seeking); .ts comes from Ruby onboard
+        # recordings, which write a stem-matched .osd sidecar alongside it.
+        video_c = None
+        for vext in ('.mp4', '.ts', '.mkv', '.avi', '.mov'):
+            cand = dirp / (stem + vext)
+            if cand.exists():
+                video_c = cand
+                break
+        if ext in ('.mp4', '.ts', '.mkv', '.avi', '.mov'):
+            if osd_c.exists():
+                self._load_osd(str(osd_c))
             else:
                 self._try_load_p1_osd(base_path)
-            if candidates['.srt'].exists(): self._load_srt(str(candidates['.srt']))
+            if srt_c.exists(): self._load_srt(str(srt_c))
         elif ext == '.osd':
-            if candidates['.srt'].exists(): self._load_srt(str(candidates['.srt']))
-            if candidates['.mp4'].exists():
-                self.video_row.set_path(str(candidates['.mp4']))
-                self._load_video(str(candidates['.mp4']))
+            if srt_c.exists(): self._load_srt(str(srt_c))
+            if video_c is not None:
+                self.video_row.set_path(str(video_c))
+                self._load_video(str(video_c))
         elif ext == '.srt':
-            if candidates['.osd'].exists(): self._load_osd(str(candidates['.osd']))
-            if candidates['.mp4'].exists():
-                self.video_row.set_path(str(candidates['.mp4']))
-                self._load_video(str(candidates['.mp4']))
+            if osd_c.exists(): self._load_osd(str(osd_c))
+            if video_c is not None:
+                self.video_row.set_path(str(video_c))
+                self._load_video(str(video_c))
 
     # ── Theme ─────────────────────────────────────────────────────────────────
 
@@ -2376,7 +2382,7 @@ class MainWindow(QMainWindow):
 
     def _on_video(self):
         p, _ = QFileDialog.getOpenFileName(self, "Select Video", "",
-                                            "Video (*.mp4 *.mkv *.avi *.mov)")
+                                            "Video (*.mp4 *.ts *.mkv *.avi *.mov)")
         if not p: return
         self.video_row.set_path(p)
         self.srt_data = None
