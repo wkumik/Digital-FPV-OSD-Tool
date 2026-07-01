@@ -40,6 +40,13 @@ SRT_FIELDS: list[tuple[str, str]] = [
     ("altitude_m",  "Altitude"),
     ("distance_m",  "Distance"),
     ("sty_mode",    "STY Mode"),
+    ("gsnr",        "Ground SNR"),
+    ("ssnr",        "Sky SNR"),
+    ("gtemp_c",     "Ground Temp"),
+    ("stemp_c",     "Sky Temp"),
+    ("frame_fps",   "Frame Rate"),
+    ("gerr",        "Ground Errors"),
+    ("serr",        "Sky Errors"),
 ]
 ALL_SRT_FIELD_KEYS: set[str] = {k for k, _ in SRT_FIELDS}
 
@@ -66,6 +73,14 @@ class TelemetryData:
     gbat_v:        Optional[float] = None
     delay_ms:      Optional[int]   = None
     sty_mode:      Optional[int]   = None
+    # CaddxFPV/Walksnail fw 39.44.15+ fields
+    gsnr:          Optional[float] = None
+    ssnr:          Optional[float] = None
+    gtemp_c:       Optional[int]   = None
+    stemp_c:       Optional[int]   = None
+    frame_fps:     Optional[int]   = None
+    gerr:          Optional[int]   = None
+    serr:          Optional[int]   = None
 
     def status_line(self, enabled: "set[str] | None" = None) -> str:
         """Build a compact one-line status string for the bottom overlay bar.
@@ -111,6 +126,20 @@ class TelemetryData:
             parts.append(f"Dist:{self.distance_m:.0f}m")
         if self.sty_mode is not None and _on("sty_mode"):
             parts.append(f"STY:{self.sty_mode}")
+        if self.gsnr is not None and _on("gsnr"):
+            parts.append(f"GSNR:{self.gsnr:.1f}")
+        if self.ssnr is not None and _on("ssnr"):
+            parts.append(f"SSNR:{self.ssnr:.1f}")
+        if self.gtemp_c is not None and _on("gtemp_c"):
+            parts.append(f"Gtemp:{self.gtemp_c}C")
+        if self.stemp_c is not None and _on("stemp_c"):
+            parts.append(f"Stemp:{self.stemp_c}C")
+        if self.frame_fps is not None and _on("frame_fps"):
+            parts.append(f"{self.frame_fps}fps")
+        if self.gerr is not None and _on("gerr"):
+            parts.append(f"Gerr:{self.gerr}")
+        if self.serr is not None and _on("serr"):
+            parts.append(f"SErr:{self.serr}")
         return "  ".join(parts)
 
 
@@ -149,8 +178,8 @@ _RADIO_RE   = re.compile(
 )
 _MBPS_RE        = re.compile(r"(?:Bitrate:)?([\d.]+)\s*Mbps", re.IGNORECASE)
 _TIME_RE        = re.compile(r"^\s*(\d{2}):(\d{2})\b")
-_DIST_RE        = re.compile(r"(?:Distance|D):\s*([\d.]+)\s*(m|ft)", re.IGNORECASE)
-_ALT_RE         = re.compile(r"H:\s*([\d.]+)\s*(m|ft)", re.IGNORECASE)
+_DIST_RE        = re.compile(r"\b(?:Distance|D):\s*([\d.]+)\s*(m|ft)", re.IGNORECASE)
+_ALT_RE         = re.compile(r"\bH:\s*([\d.]+)\s*(m|ft)", re.IGNORECASE)
 _VOLT_RE        = re.compile(r"([\d.]+)\s*V\b")
 _GPS_RE         = re.compile(r"(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)")
 # Walksnail/Avatar fields
@@ -162,6 +191,14 @@ _SBAT_RE        = re.compile(r"SBat:\s*([\d.]+)\s*V?", re.IGNORECASE)
 _GBAT_RE        = re.compile(r"GBat:\s*([\d.]+)\s*V?", re.IGNORECASE)
 _DELAY_RE       = re.compile(r"Delay:\s*(\d+)\s*ms", re.IGNORECASE)
 _STYMODE_RE     = re.compile(r"STYMode:\s*(\d+)", re.IGNORECASE)
+# CaddxFPV/Walksnail fw 39.44.15+ fields
+_GSNR_RE        = re.compile(r"\bGSNR:\s*([\d.]+)", re.IGNORECASE)
+_SSNR_RE        = re.compile(r"\bSSNR:\s*([\d.]+)", re.IGNORECASE)
+_GTEMP_RE       = re.compile(r"\bGtemp:\s*(-?\d+)", re.IGNORECASE)
+_STEMP_RE       = re.compile(r"\bStemp:\s*(-?\d+)", re.IGNORECASE)
+_FRAME_RE       = re.compile(r"\bFrame:\s*(\d+)", re.IGNORECASE)
+_GERR_RE        = re.compile(r"\bGerr:\s*(\d+)", re.IGNORECASE)
+_SERR_RE        = re.compile(r"\bSErr:\s*(\d+)", re.IGNORECASE)
 
 
 def _ft_to_m(ft: float) -> float:
@@ -219,6 +256,29 @@ def _parse_lines(lines: list[str]) -> TelemetryData:
         if sty:
             t.sty_mode = int(sty.group(1))
 
+        # Ground/Sky SNR, temperature, frame rate, error counters (CaddxFPV fw 39.44.15+)
+        gsnr = _GSNR_RE.search(line)
+        if gsnr:
+            t.gsnr = float(gsnr.group(1))
+        ssnr = _SSNR_RE.search(line)
+        if ssnr:
+            t.ssnr = float(ssnr.group(1))
+        gtemp = _GTEMP_RE.search(line)
+        if gtemp:
+            t.gtemp_c = int(gtemp.group(1))
+        stemp = _STEMP_RE.search(line)
+        if stemp:
+            t.stemp_c = int(stemp.group(1))
+        frame = _FRAME_RE.search(line)
+        if frame:
+            t.frame_fps = int(frame.group(1))
+        gerr = _GERR_RE.search(line)
+        if gerr:
+            t.gerr = int(gerr.group(1))
+        serr = _SERR_RE.search(line)
+        if serr:
+            t.serr = int(serr.group(1))
+
         # Radio interfaces
         for m in _RADIO_RE.finditer(line):
             idx  = int(m.group(1))
@@ -256,8 +316,9 @@ def _parse_lines(lines: list[str]) -> TelemetryData:
             t.gps_lat = float(gps.group(1))
             t.gps_lon = float(gps.group(2))
 
-        # Generic voltage — only if no SBat/GBat and no GPS on same line
-        if not sbat and not gbat and not gps:
+        # Generic voltage — only if no SBat/GBat matched on the same line
+        # (GPS coords never contain a literal "V", so they can't false-match _VOLT_RE)
+        if not sbat and not gbat:
             volt = _VOLT_RE.search(line)
             if volt:
                 t.voltage_v = float(volt.group(1))
