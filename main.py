@@ -55,22 +55,18 @@ except ImportError:
 from subprocess_utils import _hidden_popen
 
 
-# ─── Theme system ─────────────────────────────────────────────────────────────
+# ─── Theme, UI scale, stylesheets, icons ──────────────────────────────────────
 
-import theme as _theme_mod   # single source of truth for all colours
+# Style constants are rebound by _build_styles() on every theme/scale change —
+# always read them through the module (S.BTN_SEC), never `from ui_style import`.
+import ui_style as S
+from ui_style import _T, _fs, _icon, _icons_dir, _build_styles
 
-_DARK_THEME = True   # module-level flag; toggled by the theme button
-
-# ─── Version & UI scale ───────────────────────────────────────────────────────
+# ─── Version ──────────────────────────────────────────────────────────────────
 
 VERSION = "1.8.0"
 
-_UI_SCALE = 1.0
 _SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
-
-def _fs(n: int) -> int:
-    """Scale a font size by the active UI scale factor."""
-    return max(6, int(n * _UI_SCALE))
 
 _OSD_OFFSET_MS = 0  # persisted OSD sync offset (ms)
 
@@ -78,11 +74,11 @@ _COLORTRANS_SETTINGS: dict = {}  # loaded from settings.json "colortrans" key
 _WIDGET_SETTINGS:     list = []  # loaded from settings.json "widgets" key
 
 def _load_settings():
-    global _UI_SCALE, _OSD_OFFSET_MS, _COLORTRANS_SETTINGS, _WIDGET_SETTINGS
+    global _OSD_OFFSET_MS, _COLORTRANS_SETTINGS, _WIDGET_SETTINGS
     try:
         with open(_SETTINGS_FILE) as f:
             data = json.load(f)
-        _UI_SCALE      = float(data.get("ui_scale", 1.0))
+        S.set_ui_scale(float(data.get("ui_scale", 1.0)))
         _OSD_OFFSET_MS = int(data.get("osd_offset_ms", 0))
         _COLORTRANS_SETTINGS = data.get("colortrans", {})
         _WIDGET_SETTINGS     = data.get("widgets", []) or []
@@ -97,7 +93,7 @@ def _save_settings(**extra):
                 data = json.load(f)
         except Exception:
             pass
-        data["ui_scale"]      = _UI_SCALE
+        data["ui_scale"]      = S.ui_scale()
         data["osd_offset_ms"] = _OSD_OFFSET_MS
         data.update(extra)
         with open(_SETTINGS_FILE, "w") as f:
@@ -106,141 +102,10 @@ def _save_settings(**extra):
         pass
 
 _load_settings()
-
-def _T() -> dict:
-    """Return the active theme palette (reads live from theme.py)."""
-    return _theme_mod.get_dark() if _DARK_THEME else _theme_mod.get_light()
-
-
-def _build_styles():
-    """Rebuild all stylesheet strings from the active theme."""
-    global APP_STYLE, GROUP_STYLE, PATH_EMPTY, PATH_FILLED
-    global BTN_SEC, BTN_PRIMARY, BTN_PLAY, BTN_STOP, BTN_DANGER
-    global COMBO_STYLE, SLIDER_STYLE, PROG_STYLE
-    t = _T()
-    is_light = not _DARK_THEME
-
-    APP_STYLE = (
-        f"QMainWindow,QWidget{{background:{t['bg']};color:{t['text']};"
-        f"font-family:'Segoe UI',Arial,sans-serif;font-size:{_fs(12)}px;}}"
-        f"QLabel{{color:{t['text']};}}"
-        f"QCheckBox{{color:{t['text']};}}"
-        f"QScrollArea{{border:none;}}"
-    )
-    # Light: group titles use subtext (softer), dark: keep accent (blue)
-    title_col = t['subtext'] if is_light else t['accent']
-    GROUP_STYLE = (
-        f"QGroupBox{{border:1px solid {t['border']};border-radius:8px;margin-top:4px;"
-        f"padding:4px;font-weight:bold;color:{title_col};font-size:{_fs(11)}px;}}"
-        f"QGroupBox::title{{subcontrol-origin:margin;left:10px;padding:0 4px;}}"
-    )
-    PATH_EMPTY  = (f"background:{t['bg2']};color:{t['muted']};border:1px solid {t['border']};"
-                   f"border-radius:4px;padding:3px 8px;font-size:{_fs(11)}px;")
-    PATH_FILLED = (f"background:{t['bg2']};color:{t['text']};border:1px solid {t['border2']};"
-                   f"border-radius:4px;padding:3px 8px;font-size:{_fs(11)}px;")
-
-    # Light theme: buttons use a thin border so they read against the near-white bg
-    # without being dark slabs. Dark theme: no border needed (surfaces contrast enough).
-    btn_border     = f"1px solid {t['border2']}" if is_light else "none"
-    btn_border_hov = f"1px solid {t['border2']}" if is_light else "none"
-
-    BTN_SEC  = (f"QPushButton{{background:{t['surface']};color:{t['text']};"
-                f"border:{btn_border};border-radius:6px;"
-                f"padding:3px 10px;font-size:{_fs(11)}px;}}"
-                f"QPushButton:hover{{background:{t['surface2']};border:{btn_border_hov};}}"
-                f"QPushButton:pressed{{background:{t['surface3']};}}"
-                f"QPushButton:disabled{{background:{t['bg']};color:{t['muted']};"
-                f"border:1px solid {t['border']};}}"
-                f"QPushButton:checked{{background:{t['accent']};color:{'#ffffff' if is_light else t['bg']};border:none;}}")
-    BTN_PRIMARY = (
-        # Light: blue fill with white text — clear primary action
-        # Dark: blue gradient with dark text
-        (f"QPushButton{{background:{t['accent']};color:#ffffff;"
-         f"border:none;border-radius:8px;font-weight:bold;}}"
-         f"QPushButton:hover{{background:{t['accent2']};}}"
-         f"QPushButton:pressed{{background:{t['accent2']};}}"
-         f"QPushButton:disabled{{background:{t['surface3']};color:{t['muted']};"
-         f"border:1px solid {t['border']};}}")
-        if is_light else
-        (f"QPushButton{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-         f"stop:0 {t['accent']},stop:1 {t['accent2']});"
-         f"color:{t['bg']};border:none;border-radius:8px;}}"
-         f"QPushButton:hover{{background:{t['accent2']};}}"
-         f"QPushButton:pressed{{background:{t['accent']};}}"
-         f"QPushButton:disabled{{background:{t['surface']};color:{t['muted']};}}")
-    )
-    BTN_PLAY = (f"QPushButton{{background:{t['surface']};color:{t['text']};"
-                f"border:{btn_border};border-radius:8px;font-size:{_fs(15)}px;}}"
-                f"QPushButton:hover{{background:{t['surface2']};border:{btn_border_hov};}}"
-                f"QPushButton:pressed{{background:{t['accent']};color:#ffffff;}}"
-                f"QPushButton:disabled{{background:{t['bg']};color:{t['muted']};"
-                f"border:1px solid {t['border']};}}")
-    BTN_STOP  = (f"QPushButton{{background:{t['red']};color:#ffffff;"
-                 f"border:none;border-radius:8px;font-size:{_fs(16)}px;font-weight:bold;}}"
-                 f"QPushButton:hover{{background:{t['red']}dd;}}"
-                 f"QPushButton:pressed{{background:{t['red']};}}"
-                 f"QPushButton:disabled{{background:{t['surface']};color:{t['muted']};"
-                 f"border:1px solid {t['border']};}}")
-    BTN_DANGER = (f"QPushButton{{background:{t['surface']};color:{t['red']};"
-                  f"border:{btn_border};border-radius:6px;font-weight:bold;font-size:{_fs(11)}px;}}"
-                  f"QPushButton:hover{{background:{t['red']};color:#ffffff;border:none;}}")
-    COMBO_STYLE = (f"QComboBox{{background:{t['surface']};color:{t['text']};"
-                   f"border:1px solid {t['border2']};"
-                   f"border-radius:4px;padding:3px 8px;font-size:{_fs(11)}px;}}"
-                   f"QComboBox::drop-down{{border:none;padding-right:6px;}}"
-                   f"QComboBox QAbstractItemView{{background:{t['bg']};color:{t['text']};"
-                   f"selection-background-color:{t['surface2']};border:1px solid {t['border2']};}}")
-    SLIDER_STYLE = (f"QSlider::groove:horizontal{{background:{t['border']};height:4px;border-radius:2px;}}"
-                    f"QSlider::handle:horizontal{{background:{t['accent']};width:14px;height:14px;"
-                    f"margin:-5px 0;border-radius:7px;}}"
-                    f"QSlider::sub-page:horizontal{{background:{t['accent']};border-radius:2px;}}")
-    PROG_STYLE  = (f"QProgressBar{{background:{t['surface']};border-radius:4px;text-align:center;"
-                   f"color:{t['text']};font-size:{_fs(11)}px;}}"
-                   f"QProgressBar::chunk{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-                   f"stop:0 {t['accent']},stop:1 {t['accent2']});border-radius:4px;}}")
-
-# Initialise with dark theme
-APP_STYLE = GROUP_STYLE = PATH_EMPTY = PATH_FILLED = ""
-BTN_SEC = BTN_PRIMARY = BTN_PLAY = BTN_STOP = BTN_DANGER = ""
-COMBO_STYLE = SLIDER_STYLE = PROG_STYLE = ""
-_build_styles()
+_build_styles()   # rebuild with the UI scale just loaded from settings
 
 # Frame-slider resolution: 10 000 steps gives ~0.18 s precision on a 30-min clip.
 _SL_MAX = 10_000
-
-
-# ─── Icon helpers ─────────────────────────────────────────────────────────────
-
-def _icons_dir():
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
-
-def _icon(name: str, size: int = 22, color: str = None) -> QIcon:
-    """Load an icon tinted to the active theme's icon colour (or an explicit hex colour)."""
-    import numpy as np
-    path = os.path.join(_icons_dir(), name)
-    if not os.path.exists(path):
-        return QIcon()
-    col = QColor(color if color else _T()["icon"])
-    cr, cg, cb = col.red(), col.green(), col.blue()
-    # Load via PIL for fast numpy recolouring — much faster than per-pixel QImage loop
-    try:
-        from PIL import Image as _PILImg
-        img = _PILImg.open(path).convert("RGBA")
-        arr = np.array(img, dtype=np.uint8)
-        # Replace RGB channels with target colour, preserve alpha
-        arr[:, :, 0] = cr
-        arr[:, :, 1] = cg
-        arr[:, :, 2] = cb
-        h, w = arr.shape[:2]
-        qimg = QImage(arr.tobytes(), w, h, w * 4, QImage.Format.Format_RGBA8888)
-        pix = QPixmap.fromImage(qimg)
-    except Exception:
-        # Fallback: plain load without tinting
-        pix = QPixmap(path)
-    pix = pix.scaled(size, size,
-        Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.SmoothTransformation)
-    return QIcon(pix)
 
 
 # ─── Workers ──────────────────────────────────────────────────────────────────
@@ -310,7 +175,7 @@ class FileRow(QWidget):
         lbl_container.setLayout(lbl_row)
 
         self.path_lbl = QLabel(placeholder)
-        self.path_lbl.setStyleSheet(PATH_EMPTY)
+        self.path_lbl.setStyleSheet(S.PATH_EMPTY)
         self.path_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.path_lbl.setFixedHeight(28)
         self.path_lbl.setMinimumWidth(60)
@@ -318,12 +183,12 @@ class FileRow(QWidget):
 
         self.btn = QPushButton("Save As" if save_mode else "Browse")
         self.btn.setFixedSize(68, 28)
-        self.btn.setStyleSheet(BTN_SEC)
+        self.btn.setStyleSheet(S.BTN_SEC)
         self.btn.clicked.connect(self._browse)
 
         self.clr = QPushButton("✕")
         self.clr.setFixedSize(28, 28)
-        self.clr.setStyleSheet(BTN_DANGER)
+        self.clr.setStyleSheet(S.BTN_DANGER)
         self.clr.clicked.connect(lambda: self.set_path(""))
         self.clr.setVisible(False)
 
@@ -347,12 +212,12 @@ class FileRow(QWidget):
         if path:
             name = os.path.basename(path)
             self.path_lbl.setText(name)
-            self.path_lbl.setStyleSheet(PATH_FILLED)
+            self.path_lbl.setStyleSheet(S.PATH_FILLED)
             self.path_lbl.setToolTip(path)
             self.clr.setVisible(True)
         else:
             self.path_lbl.setText("No file selected")
-            self.path_lbl.setStyleSheet(PATH_EMPTY)
+            self.path_lbl.setStyleSheet(S.PATH_EMPTY)
             self.path_lbl.setToolTip("")
             self.clr.setVisible(False)
 
@@ -439,7 +304,7 @@ class LabeledSlider(QWidget):
         self.sl = QSlider(Qt.Orientation.Horizontal)
         self.sl.setRange(lo, hi)
         self.sl.setValue(val)
-        self.sl.setStyleSheet(SLIDER_STYLE)
+        self.sl.setStyleSheet(S.SLIDER_STYLE)
 
         self.vl = QLabel(f"{val}{suffix}")
         self.vl.setFixedWidth(56)
@@ -528,7 +393,7 @@ class CheckableComboBox(QComboBox):
 class CollapsibleGroupBox(QGroupBox):
     """A QGroupBox whose title bar collapses/expands its contents on click.
 
-    Stays a real QGroupBox so GROUP_STYLE, the theme-restyle pass, and the
+    Stays a real QGroupBox so S.GROUP_STYLE, the theme-restyle pass, and the
     usual "add widgets to its layout" pattern all keep working unchanged — only
     the class name at the call site differs. Click the title (the ▾/▸ arrow
     marks the state); content is simply hidden so the box shrinks to its title.
@@ -590,7 +455,7 @@ class CollapsibleGroupBox(QGroupBox):
 class InfoCard(QGroupBox):
     def __init__(self, title, parent=None):
         super().__init__(title, parent)
-        self.setStyleSheet(GROUP_STYLE)
+        self.setStyleSheet(S.GROUP_STYLE)
         self._g = QGridLayout(self)
         self._g.setColumnStretch(1, 1)
         self._g.setSpacing(2)
@@ -801,7 +666,7 @@ class MainWindow(QMainWindow):
         if os.path.exists(_icon_path):
             self.setWindowIcon(QIcon(_icon_path))
         self.setMinimumSize(1100, 700)
-        self.setStyleSheet(APP_STYLE)
+        self.setStyleSheet(S.APP_STYLE)
 
         # ── Root splitter: left | centre | right (resizable via drag handles) ──
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -922,7 +787,7 @@ class MainWindow(QMainWindow):
         self._scale_cb = QComboBox()
         self._scale_cb.addItems(["100%", "125%", "150%", "175%"])
         _scale_vals = [1.0, 1.25, 1.5, 1.75]
-        _scale_idx = min(range(len(_scale_vals)), key=lambda i: abs(_scale_vals[i] - _UI_SCALE))
+        _scale_idx = min(range(len(_scale_vals)), key=lambda i: abs(_scale_vals[i] - S.ui_scale()))
         self._scale_cb.setCurrentIndex(_scale_idx)
         self._scale_cb.setFixedSize(64, 28)
         self._scale_cb.setStyleSheet(
@@ -947,7 +812,7 @@ class MainWindow(QMainWindow):
 
         # ── Files group ───────────────────────────────────────────────────────
         fg = CollapsibleGroupBox("Files")
-        fg.setStyleSheet(GROUP_STYLE)
+        fg.setStyleSheet(S.GROUP_STYLE)
         fgl = QVBoxLayout(fg)
         fgl.setSpacing(4)
         fgl.setContentsMargins(10, 16, 10, 10)
@@ -976,7 +841,7 @@ class MainWindow(QMainWindow):
 
         # ── OSD Font group ────────────────────────────────────────────────────
         fontg = CollapsibleGroupBox("OSD Font")
-        fontg.setStyleSheet(GROUP_STYLE)
+        fontg.setStyleSheet(S.GROUP_STYLE)
         fontgl = QVBoxLayout(fontg)
         fontgl.setSpacing(6)
         fontgl.setContentsMargins(10, 16, 10, 10)
@@ -988,7 +853,7 @@ class MainWindow(QMainWindow):
         self._st_lbl.setFixedWidth(68)
         self._st_lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
         self.style_combo = QComboBox()
-        self.style_combo.setStyleSheet(COMBO_STYLE)
+        self.style_combo.setStyleSheet(S.COMBO_STYLE)
         self.style_combo.currentIndexChanged.connect(self._on_style_changed)
         st_row.addWidget(self._st_lbl)
         st_row.addWidget(self.style_combo, 1)
@@ -1001,7 +866,7 @@ class MainWindow(QMainWindow):
         self.hd_check.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
         self.hd_check.stateChanged.connect(self._reload_font)
         self._custom_btn = QPushButton("+  Add Font")
-        self._custom_btn.setStyleSheet(BTN_SEC)
+        self._custom_btn.setStyleSheet(S.BTN_SEC)
         self._custom_btn.setFixedHeight(26)
         self._custom_btn.clicked.connect(self._custom_font)
         hd_row.addWidget(self.hd_check)
@@ -1013,7 +878,7 @@ class MainWindow(QMainWindow):
         # attached to any recent release (release source itself ships slim
         # via .gitattributes export-ignore - see updater.py).
         self._download_fonts_btn = QPushButton("↓  Download fonts from GitHub")
-        self._download_fonts_btn.setStyleSheet(BTN_SEC)
+        self._download_fonts_btn.setStyleSheet(S.BTN_SEC)
         self._download_fonts_btn.setFixedHeight(26)
         self._download_fonts_btn.setToolTip(
             "Fetch the bundled font pack (BTFL / INAV / ArduPilot) from the "
@@ -1029,7 +894,7 @@ class MainWindow(QMainWindow):
 
         # ── Link Status Bar ───────────────────────────────────────────────────
         srtg = CollapsibleGroupBox("Link Status Bar")
-        srtg.setStyleSheet(GROUP_STYLE)
+        srtg.setStyleSheet(S.GROUP_STYLE)
         srtgl = QVBoxLayout(srtg)
         srtgl.setSpacing(4)
         srtgl.setContentsMargins(10, 16, 10, 10)
@@ -1081,7 +946,7 @@ class MainWindow(QMainWindow):
         """
         t = _T()
         wg = CollapsibleGroupBox("Custom Widgets")
-        wg.setStyleSheet(GROUP_STYLE)
+        wg.setStyleSheet(S.GROUP_STYLE)
         wgl = QVBoxLayout(wg)
         wgl.setSpacing(4)
         wgl.setContentsMargins(10, 16, 10, 10)
@@ -1091,7 +956,7 @@ class MainWindow(QMainWindow):
         # GPS map alike) can be repositioned/resized directly on the preview.
         self.widget_edit_btn = QPushButton("  Layout locked")
         self.widget_edit_btn.setCheckable(True)
-        self.widget_edit_btn.setStyleSheet(BTN_SEC)
+        self.widget_edit_btn.setStyleSheet(S.BTN_SEC)
         self.widget_edit_btn.setFixedHeight(26)
         self.widget_edit_btn.setIcon(_icon("lock.png", 16))
         self.widget_edit_btn.setToolTip(
@@ -1115,11 +980,11 @@ class MainWindow(QMainWindow):
         wbtn_row = QHBoxLayout()
         wbtn_row.setSpacing(4)
         self.widget_add_btn = QPushButton("＋ Add")
-        self.widget_add_btn.setStyleSheet(BTN_SEC)
+        self.widget_add_btn.setStyleSheet(S.BTN_SEC)
         self.widget_add_btn.setFixedHeight(26)
         self.widget_add_btn.clicked.connect(self._on_widget_add)
         self.widget_remove_btn = QPushButton("− Remove")
-        self.widget_remove_btn.setStyleSheet(BTN_SEC)
+        self.widget_remove_btn.setStyleSheet(S.BTN_SEC)
         self.widget_remove_btn.setFixedHeight(26)
         self.widget_remove_btn.clicked.connect(self._on_widget_remove)
         wbtn_row.addWidget(self.widget_add_btn)
@@ -1131,7 +996,7 @@ class MainWindow(QMainWindow):
         # OSD-sourced widget stays blank because the symbol table doesn't match
         # the firmware's font (e.g. Betaflight vs INAV voltage/throttle icons).
         self.widget_diag_btn = QPushButton("🔍  Diagnose OSD glyphs")
-        self.widget_diag_btn.setStyleSheet(BTN_SEC)
+        self.widget_diag_btn.setStyleSheet(S.BTN_SEC)
         self.widget_diag_btn.setFixedHeight(26)
         self.widget_diag_btn.setToolTip(
             "Scan the current OSD frame for digit runs and report the "
@@ -1193,7 +1058,7 @@ class MainWindow(QMainWindow):
         self.wp_color_btn = QPushButton("…")
         self.wp_color_btn.setFixedWidth(28)
         self.wp_color_btn.setFixedHeight(22)
-        self.wp_color_btn.setStyleSheet(BTN_SEC)
+        self.wp_color_btn.setStyleSheet(S.BTN_SEC)
         self.wp_color_btn.clicked.connect(self._on_widget_pick_color)
         wp.addWidget(self.wp_color_btn, row, 2)
         row += 1
@@ -1279,7 +1144,7 @@ class MainWindow(QMainWindow):
         # a widget under the hood (draggable on the canvas), but it's created,
         # sized, and styled here rather than from the widget list.
         mapg = CollapsibleGroupBox("GPS Map")
-        mapg.setStyleSheet(GROUP_STYLE)
+        mapg.setStyleSheet(S.GROUP_STYLE)
         self.map_group = mapg
         mgl = QGridLayout(mapg)
         mgl.setContentsMargins(10, 16, 10, 10)
@@ -1301,7 +1166,7 @@ class MainWindow(QMainWindow):
         # resized on the canvas like any other.
         self.map_show_btn = QPushButton("  Map hidden")
         self.map_show_btn.setCheckable(True)
-        self.map_show_btn.setStyleSheet(BTN_SEC)
+        self.map_show_btn.setStyleSheet(S.BTN_SEC)
         self.map_show_btn.setFixedHeight(28)
         self.map_show_btn.setIcon(_icon("eye-closed.png", 16))
         self.map_show_btn.setToolTip(
@@ -1392,8 +1257,8 @@ class MainWindow(QMainWindow):
         self._player_panel = PlayerPanel(
             theme_fn=_T,
             icon_fn=_icon,
-            btn_play_fn=lambda: BTN_PLAY,
-            btn_sec_fn=lambda: BTN_SEC,
+            btn_play_fn=lambda: S.BTN_PLAY,
+            btn_sec_fn=lambda: S.BTN_SEC,
             fs_fn=_fs,
             composite_fn=self._composite,
             osd_fn=self._render_osd_overlay,
@@ -1453,7 +1318,7 @@ class MainWindow(QMainWindow):
 
         # Fine-tune position
         posg = QGroupBox("Fine-tune Position & Scale")
-        posg.setStyleSheet(GROUP_STYLE)
+        posg.setStyleSheet(S.GROUP_STYLE)
         posgl = QVBoxLayout(posg)
         posgl.setSpacing(4)
         posgl.setContentsMargins(10, 16, 10, 10)
@@ -1509,7 +1374,7 @@ class MainWindow(QMainWindow):
         self._rst_offset_btn = QPushButton("↺")
         self._rst_offset_btn.setFixedWidth(28)
         self._rst_offset_btn.setFixedHeight(24)
-        self._rst_offset_btn.setStyleSheet(BTN_SEC)
+        self._rst_offset_btn.setStyleSheet(S.BTN_SEC)
         self._rst_offset_btn.setToolTip("Reset OSD offset to 0")
         self._rst_offset_btn.clicked.connect(lambda: self.osd_offset_sb.setValue(0))
         sync_row.addWidget(self._sync_lbl)
@@ -1518,14 +1383,14 @@ class MainWindow(QMainWindow):
         posgl.addLayout(sync_row)
 
         self._rst_pos_btn = QPushButton("↺  Reset")
-        self._rst_pos_btn.setStyleSheet(BTN_SEC)
+        self._rst_pos_btn.setStyleSheet(S.BTN_SEC)
         self._rst_pos_btn.setFixedHeight(26)
         self._rst_pos_btn.clicked.connect(self._reset_pos)
         posgl.addWidget(self._rst_pos_btn)
 
         # ── Hide OSD Regions ──────────────────────────────────────────────
         hideg = QGroupBox("Hide OSD Regions")
-        hideg.setStyleSheet(GROUP_STYLE)
+        hideg.setStyleSheet(S.GROUP_STYLE)
         hidegl = QVBoxLayout(hideg)
         hidegl.setSpacing(4)
         hidegl.setContentsMargins(10, 16, 10, 10)
@@ -1540,16 +1405,16 @@ class MainWindow(QMainWindow):
         hide_btn_row.setSpacing(4)
         self.hide_add_btn = QPushButton("＋ Add")
         self.hide_add_btn.setCheckable(True)
-        self.hide_add_btn.setStyleSheet(BTN_SEC)
+        self.hide_add_btn.setStyleSheet(S.BTN_SEC)
         self.hide_add_btn.setFixedHeight(26)
         self.hide_add_btn.toggled.connect(self._on_hide_add_toggled)
         self.hide_remove_btn = QPushButton("− Remove")
         self.hide_remove_btn.setCheckable(True)
-        self.hide_remove_btn.setStyleSheet(BTN_SEC)
+        self.hide_remove_btn.setStyleSheet(S.BTN_SEC)
         self.hide_remove_btn.setFixedHeight(26)
         self.hide_remove_btn.toggled.connect(self._on_hide_remove_toggled)
         self.hide_clear_btn = QPushButton("Clear")
-        self.hide_clear_btn.setStyleSheet(BTN_SEC)
+        self.hide_clear_btn.setStyleSheet(S.BTN_SEC)
         self.hide_clear_btn.setFixedHeight(26)
         self.hide_clear_btn.clicked.connect(self._on_hide_clear)
         hide_btn_row.addWidget(self.hide_add_btn)
@@ -1594,7 +1459,7 @@ class MainWindow(QMainWindow):
         t = _T()
 
         self._cc_group = QGroupBox("Color Correction")
-        self._cc_group.setStyleSheet(GROUP_STYLE)
+        self._cc_group.setStyleSheet(S.GROUP_STYLE)
         ccl = QVBoxLayout(self._cc_group)
         ccl.setSpacing(2)
         ccl.setContentsMargins(10, 14, 10, 6)
@@ -1648,7 +1513,7 @@ class MainWindow(QMainWindow):
 
         # RGB multipliers — button opens popup dialog
         self._cc_rgb_btn = QPushButton("R / G / B:  1.00 / 1.00 / 1.00")
-        self._cc_rgb_btn.setStyleSheet(BTN_SEC)
+        self._cc_rgb_btn.setStyleSheet(S.BTN_SEC)
         self._cc_rgb_btn.setFixedHeight(26)
         self._cc_rgb_btn.clicked.connect(self._cc_open_rgb_popup)
         ccl.addWidget(self._cc_rgb_btn)
@@ -1680,14 +1545,14 @@ class MainWindow(QMainWindow):
         self._cc_preset_lbl.setStyleSheet(f"color:{t['subtext']};font-size:11px;")
         self._cc_preset_lbl.setFixedWidth(48)
         self.cc_preset_cb = QComboBox()
-        self.cc_preset_cb.setStyleSheet(COMBO_STYLE)
+        self.cc_preset_cb.setStyleSheet(S.COMBO_STYLE)
         self.cc_preset_cb.currentIndexChanged.connect(self._on_cc_preset_changed)
         self._cc_save_btn = QPushButton("Save…")
-        self._cc_save_btn.setStyleSheet(BTN_SEC)
+        self._cc_save_btn.setStyleSheet(S.BTN_SEC)
         self._cc_save_btn.setFixedHeight(24)
         self._cc_save_btn.clicked.connect(self._cc_save_preset)
         self._cc_rst_btn = QPushButton("Reset")
-        self._cc_rst_btn.setStyleSheet(BTN_SEC)
+        self._cc_rst_btn.setStyleSheet(S.BTN_SEC)
         self._cc_rst_btn.setFixedHeight(24)
         self._cc_rst_btn.setToolTip("Reset all color correction to defaults")
         self._cc_rst_btn.clicked.connect(self._cc_reset_defaults)
@@ -1736,7 +1601,7 @@ class MainWindow(QMainWindow):
 
         # ── Output & Encoding (merged) ───────────────────────────────────────
         encg = QGroupBox("Output & Encoding")
-        encg.setStyleSheet(GROUP_STYLE)
+        encg.setStyleSheet(S.GROUP_STYLE)
         encgl = QVBoxLayout(encg)
         encgl.setSpacing(4)
         encgl.setContentsMargins(10, 14, 10, 8)
@@ -1754,7 +1619,7 @@ class MainWindow(QMainWindow):
         self._codec_lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:11px;")
         self.codec_cb = QComboBox()
         self.codec_cb.addItems(["H.264 (libx264)", "H.265 (libx265)"])
-        self.codec_cb.setStyleSheet(COMBO_STYLE)
+        self.codec_cb.setStyleSheet(S.COMBO_STYLE)
         self.codec_cb.currentIndexChanged.connect(self._on_codec_changed)
         codec_row.addWidget(self._codec_lbl)
         codec_row.addWidget(self.codec_cb, 1)
@@ -1776,7 +1641,7 @@ class MainWindow(QMainWindow):
             "Use the arrows on the right for ±1 Mbit/s fine steps.\n"
             "Auto-set to source average bitrate on video load."
         )
-        self.mbps_sl.setStyleSheet(SLIDER_STYLE)
+        self.mbps_sl.setStyleSheet(S.SLIDER_STYLE)
         self.mbps_spin = QSpinBox()
         self.mbps_spin.setRange(1, 100)
         self.mbps_spin.setValue(8)
@@ -1856,7 +1721,7 @@ class MainWindow(QMainWindow):
         self._upscale_lbl.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
         self.upscale_combo = QComboBox()
         self.upscale_combo.addItems(["Off", "1440p  (2560×1440)", "2.7K  (2688×1512)", "4K  (3840×2160)"])
-        self.upscale_combo.setStyleSheet(COMBO_STYLE)
+        self.upscale_combo.setStyleSheet(S.COMBO_STYLE)
         self.upscale_combo.setToolTip(
             "Scale the output video to a higher resolution using Lanczos.\n"
             "Useful when source is 1080p and you want a sharper result on a high-res display."
@@ -1871,7 +1736,7 @@ class MainWindow(QMainWindow):
         self._aspect_lbl.setStyleSheet(f"color:{_T()['text']};font-size:11px;")
         self.aspect_combo = QComboBox()
         self.aspect_combo.addItems(["Source", "16:9", "4:3", "21:9", "1:1", "9:16"])
-        self.aspect_combo.setStyleSheet(COMBO_STYLE)
+        self.aspect_combo.setStyleSheet(S.COMBO_STYLE)
         self.aspect_combo.setToolTip(
             "Pad the video into a wider or taller canvas with black bars.\n"
             "Use this to put a 4:3 source into a 16:9 frame and place OSD\n"
@@ -1933,13 +1798,13 @@ class MainWindow(QMainWindow):
         self.render_btn.setIcon(_icon("render.png", 18))
         self.render_btn.setFixedHeight(36)
         self.render_btn.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        self.render_btn.setStyleSheet(BTN_PRIMARY)
+        self.render_btn.setStyleSheet(S.BTN_PRIMARY)
         self.render_btn.clicked.connect(self._render)
 
         self.stop_btn = QPushButton()
         self.stop_btn.setIcon(_icon("stop.png", 18))
         self.stop_btn.setFixedSize(36, 36)
-        self.stop_btn.setStyleSheet(BTN_STOP)
+        self.stop_btn.setStyleSheet(S.BTN_STOP)
         self.stop_btn.setToolTip("Stop render")
         self.stop_btn.clicked.connect(self._stop_render)
         self.stop_btn.setEnabled(False)
@@ -2199,14 +2064,12 @@ class MainWindow(QMainWindow):
         self._apply_theme()
 
     def _on_scale_changed(self, idx: int):
-        global _UI_SCALE
-        _UI_SCALE = [1.0, 1.25, 1.5, 1.75][idx]
+        S.set_ui_scale([1.0, 1.25, 1.5, 1.75][idx])
         self._refresh_theme()
         _save_settings()
 
     def _toggle_theme(self):
-        global _DARK_THEME
-        _DARK_THEME = not _DARK_THEME
+        S.set_dark_theme(not S.is_dark())
         self._refresh_theme()
 
     def _open_theme_editor(self):
@@ -2242,7 +2105,7 @@ class MainWindow(QMainWindow):
     def _apply_theme(self):
         """Reapply all stylesheets after a theme change."""
         t = _T()
-        self.setStyleSheet(APP_STYLE)
+        self.setStyleSheet(S.APP_STYLE)
         self._update_splitter_style()
 
         # Palette + theme toggle buttons
@@ -2251,7 +2114,7 @@ class MainWindow(QMainWindow):
             f"QPushButton:hover{{background:{t['surface']};}}"
         )
         self._palette_btn.setStyleSheet(_icon_btn_ss)
-        self._theme_btn.setIcon(_icon("moon-dark.png" if _DARK_THEME else "moon-light.png", 18))
+        self._theme_btn.setIcon(_icon("moon-dark.png" if S.is_dark() else "moon-light.png", 18))
         self._theme_btn.setStyleSheet(
             f"QPushButton{{background:transparent;border:none;border-radius:15px;}}"
             f"QPushButton:hover{{background:{t['surface']};}}"
@@ -2275,11 +2138,11 @@ class MainWindow(QMainWindow):
 
         # Structural widgets
         for gb in self.findChildren(QGroupBox):
-            gb.setStyleSheet(GROUP_STYLE)
+            gb.setStyleSheet(S.GROUP_STYLE)
         for sl in self.findChildren(QSlider):
-            sl.setStyleSheet(SLIDER_STYLE)
+            sl.setStyleSheet(S.SLIDER_STYLE)
         for cb in self.findChildren(QComboBox):
-            cb.setStyleSheet(COMBO_STYLE)
+            cb.setStyleSheet(S.COMBO_STYLE)
         for ck in self.findChildren(QCheckBox):
             ck.setStyleSheet(f"color:{t['text']};font-size:{_fs(11)}px;")
         for div in self._dividers:
@@ -2293,31 +2156,31 @@ class MainWindow(QMainWindow):
         for row in [self.video_row, self.osd_row, self.srt_row, self.out_row,
                      self.cc_glsl_row]:
             row._name_lbl.setStyleSheet(f"color:{t['subtext']}")
-            row.path_lbl.setStyleSheet(PATH_FILLED if row.path else PATH_EMPTY)
-            row.btn.setStyleSheet(BTN_SEC)
-            row.clr.setStyleSheet(BTN_DANGER)
+            row.path_lbl.setStyleSheet(S.PATH_FILLED if row.path else S.PATH_EMPTY)
+            row.btn.setStyleSheet(S.BTN_SEC)
+            row.clr.setStyleSheet(S.BTN_DANGER)
         self.drop_zone.refresh_theme()
 
         # Player panel
         self._player_panel.refresh_theme()
 
         # Buttons + icon retint
-        self.render_btn.setStyleSheet(BTN_PRIMARY)
-        self.stop_btn.setStyleSheet(BTN_STOP)
-        _render_ico_col = "#ffffff" if not _DARK_THEME else t['bg']
+        self.render_btn.setStyleSheet(S.BTN_PRIMARY)
+        self.stop_btn.setStyleSheet(S.BTN_STOP)
+        _render_ico_col = "#ffffff" if not S.is_dark() else t['bg']
         self.render_btn.setIcon(_icon("render.png", 20, _render_ico_col))
         self.stop_btn.setIcon(_icon("stop.png", 20, "#ffffff"))
         # File row icons
         for row in [self.video_row, self.osd_row, self.srt_row, self.out_row]:
             row.retint()
-        self._custom_btn.setStyleSheet(BTN_SEC)
-        self._rst_pos_btn.setStyleSheet(BTN_SEC)
-        self._rst_offset_btn.setStyleSheet(BTN_SEC)
-        self._player_panel.trim_rst_btn.setStyleSheet(BTN_SEC)
-        self._cc_save_btn.setStyleSheet(BTN_SEC)
-        self._cc_rst_btn.setStyleSheet(BTN_SEC)
-        self._cc_rgb_btn.setStyleSheet(BTN_SEC)
-        # Buttons constructed with BTN_SEC that the per-name restyling above
+        self._custom_btn.setStyleSheet(S.BTN_SEC)
+        self._rst_pos_btn.setStyleSheet(S.BTN_SEC)
+        self._rst_offset_btn.setStyleSheet(S.BTN_SEC)
+        self._player_panel.trim_rst_btn.setStyleSheet(S.BTN_SEC)
+        self._cc_save_btn.setStyleSheet(S.BTN_SEC)
+        self._cc_rst_btn.setStyleSheet(S.BTN_SEC)
+        self._cc_rgb_btn.setStyleSheet(S.BTN_SEC)
+        # Buttons constructed with S.BTN_SEC that the per-name restyling above
         # misses, so they'd keep the old palette in light mode. Includes the
         # checkable "Edit on canvas" / hide toggles and the font downloader.
         for _b in (self.widget_add_btn, self.widget_remove_btn,
@@ -2325,7 +2188,7 @@ class MainWindow(QMainWindow):
                    self.map_show_btn,
                    self.hide_add_btn, self.hide_remove_btn, self.hide_clear_btn,
                    self._download_fonts_btn):
-            _b.setStyleSheet(BTN_SEC)
+            _b.setStyleSheet(S.BTN_SEC)
         # Re-tint the stateful icon buttons to the new theme's icon colour,
         # picking the glyph that matches each button's current toggle state.
         self.widget_edit_btn.setIcon(
@@ -3183,10 +3046,10 @@ class MainWindow(QMainWindow):
         vl.addWidget(txt)
         btn_row = QHBoxLayout()
         copy_btn = QPushButton("Copy to clipboard")
-        copy_btn.setStyleSheet(BTN_SEC)
+        copy_btn.setStyleSheet(S.BTN_SEC)
         copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(report))
         close_btn = QPushButton("Close")
-        close_btn.setStyleSheet(BTN_PRIMARY)
+        close_btn.setStyleSheet(S.BTN_PRIMARY)
         close_btn.clicked.connect(dlg.accept)
         btn_row.addStretch()
         btn_row.addWidget(copy_btn)
@@ -3435,10 +3298,10 @@ class MainWindow(QMainWindow):
 
         btn_row = QHBoxLayout()
         rst_btn = QPushButton("Reset (1.0)")
-        rst_btn.setStyleSheet(BTN_SEC)
+        rst_btn.setStyleSheet(S.BTN_SEC)
         rst_btn.clicked.connect(lambda: (r_sl.setValue(100), g_sl.setValue(100), b_sl.setValue(100)))
         ok_btn = QPushButton("Close")
-        ok_btn.setStyleSheet(BTN_PRIMARY)
+        ok_btn.setStyleSheet(S.BTN_PRIMARY)
         ok_btn.setFixedHeight(28)
         ok_btn.clicked.connect(dlg.accept)
         btn_row.addWidget(rst_btn)
@@ -3905,13 +3768,13 @@ class MainWindow(QMainWindow):
             btn_row2 = QHBoxLayout()
             btn_row2.setSpacing(6)
             overwrite_btn = QPushButton("Overwrite")
-            overwrite_btn.setStyleSheet(BTN_DANGER)
+            overwrite_btn.setStyleSheet(S.BTN_DANGER)
             overwrite_btn.setFixedHeight(32)
             save_as_btn = QPushButton("Save with this name")
-            save_as_btn.setStyleSheet(BTN_PRIMARY)
+            save_as_btn.setStyleSheet(S.BTN_PRIMARY)
             save_as_btn.setFixedHeight(32)
             cancel_btn2 = QPushButton("Cancel")
-            cancel_btn2.setStyleSheet(BTN_SEC)
+            cancel_btn2.setStyleSheet(S.BTN_SEC)
             cancel_btn2.setFixedHeight(32)
             btn_row2.addWidget(cancel_btn2)
             btn_row2.addStretch()
@@ -4135,13 +3998,13 @@ class MainWindow(QMainWindow):
 
         btn_row = QHBoxLayout()
         later_btn = QPushButton("Remind me later")
-        later_btn.setStyleSheet(BTN_SEC)
+        later_btn.setStyleSheet(S.BTN_SEC)
         later_btn.setToolTip("Ask again next launch.")
         skip_btn = QPushButton(f"Skip {info.tag}")
-        skip_btn.setStyleSheet(BTN_SEC)
+        skip_btn.setStyleSheet(S.BTN_SEC)
         skip_btn.setToolTip("Don't ask about this version again.")
         update_btn = QPushButton("Update now")
-        update_btn.setStyleSheet(BTN_PRIMARY)
+        update_btn.setStyleSheet(S.BTN_PRIMARY)
         update_btn.setDefault(True)
         btn_row.addStretch()
         btn_row.addWidget(later_btn)
