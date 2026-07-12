@@ -6,7 +6,7 @@ player.py — Video player widgets for VueOSD.
 Contains: VideoCanvas, Timeline, TransportBar, PlayerController, PlayerPanel.
 """
 
-import os, sys, time, threading, subprocess, random
+import os, sys, time, bisect, threading, subprocess, random
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -18,12 +18,10 @@ from PyQt6.QtGui import (
     QLinearGradient, QDesktopServices,
 )
 
-try:
-    from PIL import Image as PILImage
-    PIL_OK = True
-except ImportError:
-    PIL_OK = False
-
+from _player_common import (
+    _SL_MAX, _CACHE_MAX, _MAX_PLAYBACK_LAG_S, PIL_OK, PILImage,
+    rawvideo_cmd, rgba_from_rgb24,
+)
 from subprocess_utils import _hidden_popen
 from video_processor import find_ffmpeg, get_frame_pts
 from osd_renderer import OsdRenderConfig, render_osd_frame, render_fallback
@@ -59,15 +57,6 @@ _DONATE_NOTES = [
     "Free as in freedom. Expensive as in FPV.",
 ]
 _DONATE_NOTE = random.choice(_DONATE_NOTES)
-
-# Slider resolution
-_SL_MAX = 10_000
-_CACHE_MAX = 64
-# Playback: how far behind the real-time schedule frame-dropping is allowed
-# to chase before we give up on real time and re-anchor the playback clock.
-# Beyond this, dropping would starve the display entirely (frozen preview);
-# re-anchoring instead plays slightly slower than real time but keeps moving.
-_MAX_PLAYBACK_LAG_S = 0.35
 
 
 # ─── VideoCanvas ──────────────────────────────────────────────────────────────
@@ -1314,8 +1303,7 @@ class PlayerController:
         if new == self.full_quality_preview:
             return
         self.full_quality_preview = new
-        if hasattr(self, "cached_frames"):
-            self.cached_frames.clear()
+        self.cached_frames.clear()
         self.timeline.set_cached(set())
         if self.video_path and self.video_w > 0 and self.video_h > 0:
             pct = int(self.timeline._position * _SL_MAX)
@@ -1377,8 +1365,7 @@ class PlayerController:
         dimensions are unknown.
         When `full_quality_preview` is set, returns native source dims so
         the preview shows pixel-perfect frames at the cost of decode speed."""
-        if getattr(self, "full_quality_preview", False) \
-                and self.video_w > 0 and self.video_h > 0:
+        if self.full_quality_preview and self.video_w > 0 and self.video_h > 0:
             sw = self.video_w - (self.video_w % 2)
             sh = self.video_h - (self.video_h % 2)
             return max(2, sw), max(2, sh)
@@ -1457,21 +1444,16 @@ class PlayerController:
 
         def _run():
             try:
-                color_vf = getattr(self, '_color_vf', '')
-                vf_parts = [f for f in [color_vf, f"scale={scale_w}:{scale_h}"] if f]
+                cmd = rawvideo_cmd(ffmpeg, self.video_path, t, scale_w, scale_h,
+                                   color_vf=self._color_vf, vframes=1, hwaccel=False)
                 proc = _hidden_popen(
-                    [ffmpeg, "-ss", str(t), "-i", self.video_path,
-                     "-vf", ",".join(vf_parts),
-                     "-vframes", "1", "-f", "rawvideo", "-pix_fmt", "rgb24",
-                     "-v", "quiet", "pipe:1"],
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 )
                 self._extract_proc = proc
                 data = proc.stdout.read(nbytes)
                 proc.wait(timeout=20)
-                if data and len(data) >= nbytes and PIL_OK:
-                    img = PILImage.frombytes("RGB", (scale_w, scale_h), data[:nbytes])
-                    img = img.convert("RGBA")
+                img = rgba_from_rgb24(data, scale_w, scale_h)
+                if img is not None:
                     self.cached_frames[pct] = img
                     self._evict_cache(pct)
                     self.timeline.add_cached(pct / _SL_MAX)
@@ -1518,7 +1500,6 @@ class PlayerController:
             return
         scale_w, scale_h = self._extraction_dims(1080)
         nbytes = scale_w * scale_h * 3
-        color_vf = getattr(self, '_color_vf', '')
 
         for pct in positions:
             if self._prefetch_stop:
@@ -1527,19 +1508,15 @@ class PlayerController:
                 continue
             t = self.video_dur * pct / _SL_MAX
             try:
-                vf_parts = [f for f in [color_vf, f"scale={scale_w}:{scale_h}"] if f]
+                cmd = rawvideo_cmd(ffmpeg, self.video_path, t, scale_w, scale_h,
+                                   color_vf=self._color_vf, vframes=1, hwaccel=False)
                 proc = _hidden_popen(
-                    [ffmpeg, "-ss", str(t), "-i", self.video_path,
-                     "-vf", ",".join(vf_parts),
-                     "-vframes", "1", "-f", "rawvideo", "-pix_fmt", "rgb24",
-                     "-v", "quiet", "pipe:1"],
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 )
                 data = proc.stdout.read(nbytes)
                 proc.wait(timeout=15)
-                if (not self._prefetch_stop and data and len(data) >= nbytes and PIL_OK):
-                    img = PILImage.frombytes("RGB", (scale_w, scale_h), data[:nbytes])
-                    img = img.convert("RGBA")
+                img = None if self._prefetch_stop else rgba_from_rgb24(data, scale_w, scale_h)
+                if img is not None:
                     self.cached_frames[pct] = img
                     self.timeline.add_cached(pct / _SL_MAX)
             except Exception:
@@ -1576,22 +1553,10 @@ class PlayerController:
         self._playing = True
         self.transport.set_playing(True)
 
-        color_vf = getattr(self, '_color_vf', '')
-        vf_parts = [f for f in [color_vf, f"scale={scale_w}:{scale_h}"] if f]
-        cmd = [
-            ffmpeg,
-            # Best-effort GPU decode (~3x faster on HEVC); FFmpeg falls back
-            # to software decoding on its own if no hwaccel is available.
-            "-hwaccel", "auto",
-            "-ss", str(seek_s),
-            "-i", self.video_path,
-            "-vf", ",".join(vf_parts),
-            "-f", "rawvideo",
-            "-pix_fmt", "rgb24",
-            "-an",
-            "-v", "quiet",
-            "pipe:1",
-        ]
+        # Best-effort GPU decode (~3x faster on HEVC); FFmpeg falls back
+        # to software decoding on its own if no hwaccel is available.
+        cmd = rawvideo_cmd(ffmpeg, self.video_path, seek_s, scale_w, scale_h,
+                           color_vf=self._color_vf, vframes=None, hwaccel=True)
 
         try:
             self._ffplay_proc = _hidden_popen(
@@ -1635,7 +1600,6 @@ class PlayerController:
         # Find starting frame index in PTS list
         pts_base_idx = 0
         if pts:
-            import bisect
             pts_base_idx = bisect.bisect_left(pts, seek)
 
         frame_idx = 0
@@ -1686,11 +1650,13 @@ class PlayerController:
                 self._ffplay_t0 = t0
                 deadline = now
 
+            img = rgba_from_rgb24(data, w, h)
+            if img is None:
+                continue
+
             try:
                 pct_norm = video_time_s / self.video_dur if self.video_dur > 0 else 0.0
                 pct_sl = int(pct_norm * _SL_MAX)
-
-                img = PILImage.frombytes("RGB", (w, h), data[:nbytes]).convert("RGBA")
 
                 # Composite OSD
                 if self._composite_fn:
