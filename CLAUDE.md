@@ -51,8 +51,11 @@ The application is a pipeline: parse → render → pipe → encode.
 ```
 main.py (PyQt6 GUI — MainWindow, FileRow, LabeledSlider, RenderBar)
     │
-    ├── player.py              — Video player (VideoCanvas, Timeline, TransportBar,
-    │                              PlayerController, PlayerPanel)
+    ├── player.py              — Video player (PlayerController, PlayerPanel)
+    │   ├── _player_common.py     — Constants, PIL guard, FFmpeg rawvideo cmd + frame decode
+    │   ├── _player_views.py      — VideoCanvas, Timeline, TransportBar
+    │   ├── _player_extract.py    — FrameCache (distance-based eviction)
+    │   └── _player_playback.py   — plan_frame() pacing decision + PlaybackEngine
     │
     ├── osd_parser.py          — Binary .osd format parser (timestamp-indexed, bisect lookup)
     ├── p1_osd_parser.py       — BetaFPV P1 MP4 embedded OSD extraction
@@ -110,13 +113,13 @@ main.py (PyQt6 GUI — MainWindow, FileRow, LabeledSlider, RenderBar)
 
 **Firmware auto-detection** (`main.py` `_load_osd()`): Reads the 4-byte FC type tag from the OSD header (`BTFL` → Betaflight, `INAV` → INAV, `ARDU` → ArduPilot) and calls `_on_fw_changed()` directly. Unknown tags fall back to Betaflight. There is no firmware selector in the UI.
 
-**Video player** (`player.py`): Contains `VideoCanvas` (frame display with Quick Start placeholder), `Timeline` (scrub + trim handles + cache dots), `TransportBar` (play/pause, step, shuttle controls), `PlayerController` (FFmpeg pipe management, frame cache, playback state machine), and `PlayerPanel` (container). Keyboard shortcuts (Space, Left/Right, J/K/L, I/O, Home/End) are handled in `MainWindow.keyPressEvent()` and delegated to `PlayerController`.
+**Video player** (`player.py`): `PlayerController` (coordinator — video state, frame cache, seek/scrub/prefetch, OSD refresh, trim, shuttle) and `PlayerPanel` (container). The parts it coordinates live in private submodules: `_player_views.py` holds `VideoCanvas` (frame display with Quick Start placeholder), `Timeline` (scrub + trim handles + cache dots) and `TransportBar` (play/pause, step, shuttle controls); `_player_playback.py` holds `PlaybackEngine` (FFmpeg pipe, reader thread, frame buffer, 60 Hz display timer) plus the pure `plan_frame()` pacing decision; `_player_extract.py` holds `FrameCache`; `_player_common.py` holds the shared FFmpeg rawvideo command builder and rgb24→RGBA decode. `VideoCanvas`, `Timeline`, `TransportBar` and `_SL_MAX` stay importable from `player`. Keyboard shortcuts (Space, Left/Right, J/K/L, I/O, Home/End) are handled in `MainWindow.keyPressEvent()` and delegated to `PlayerController`.
 
 **Windows taskbar integration** (`main.py`): Sets `AppUserModelID` via ctypes for proper icon display. Subprocess calls use `subprocess_utils.py` wrappers that hide console windows via `STARTF_USESHOWWINDOW` + `CREATE_NO_WINDOW`.
 
 ## Codebase Conventions
 
-- Private submodules (not part of the public API) are prefixed with `_`: `_widget_primitives.py`, `_widget_draw.py`, `_widget_map.py`, `_widget_map_tiles.py`
+- Private submodules (not part of the public API) are prefixed with `_`: `_widget_primitives.py`, `_widget_draw.py`, `_widget_map.py`, `_widget_map_tiles.py`, `_player_common.py`, `_player_views.py`, `_player_extract.py`, `_player_playback.py`
 - All `.py` files include an SPDX license header and copyright line
 - UI classes use PyQt6 naming conventions (camelCase methods), while data/logic modules use snake_case
 - Caching is aggressive: projection results, visual tracks, basemaps, and slim-digit maps are all cached by identity or content hash, with weakref-based eviction for per-file caches
