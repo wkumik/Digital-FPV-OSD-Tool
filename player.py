@@ -63,6 +63,11 @@ _DONATE_NOTE = random.choice(_DONATE_NOTES)
 # Slider resolution
 _SL_MAX = 10_000
 _CACHE_MAX = 64
+# Playback: how far behind the real-time schedule frame-dropping is allowed
+# to chase before we give up on real time and re-anchor the playback clock.
+# Beyond this, dropping would starve the display entirely (frozen preview);
+# re-anchoring instead plays slightly slower than real time but keeps moving.
+_MAX_PLAYBACK_LAG_S = 0.35
 
 
 # ─── VideoCanvas ──────────────────────────────────────────────────────────────
@@ -1557,7 +1562,11 @@ class PlayerController:
             return
 
         seek_s = self.video_dur * self.timeline._position
-        scale_w, scale_h = self._extraction_dims(1080)
+        # Playback runs at 720p to keep pipe traffic + per-frame composite
+        # inside the real-time budget (high-bitrate 1080p90 sources overrun
+        # it at 1080p). Paused/scrubbed frames still extract at 1080, and
+        # full_quality_preview overrides this to native dims.
+        scale_w, scale_h = self._extraction_dims(720)
 
         self._ffplay_stop.clear()
         self._ffplay_seek = seek_s
@@ -1571,6 +1580,9 @@ class PlayerController:
         vf_parts = [f for f in [color_vf, f"scale={scale_w}:{scale_h}"] if f]
         cmd = [
             ffmpeg,
+            # Best-effort GPU decode (~3x faster on HEVC); FFmpeg falls back
+            # to software decoding on its own if no hwaccel is available.
+            "-hwaccel", "auto",
             "-ss", str(seek_s),
             "-i", self.video_path,
             "-vf", ",".join(vf_parts),
@@ -1616,7 +1628,7 @@ class PlayerController:
         fps = snap["fps"]
         speed = snap["speed"]
         frame_dur = 1.0 / fps
-        t0 = self._ffplay_t0
+        t0 = None   # anchored when the first decoded frame arrives
 
         # Snapshot PTS list for this playback session
         pts = self.pts_list if self._pts_ready else []
@@ -1635,24 +1647,44 @@ class PlayerController:
             if not data or len(data) < nbytes:
                 break
 
-            # Intended wall-clock display moment + video timestamp for this
-            # frame, computed before the expensive composite so we can decide
-            # whether we're already too late to show it.
-            deadline = t0 + frame_idx * frame_dur / speed
+            # Video timestamp for this frame and its offset from the seek
+            # point (its slot on the playback clock). When per-frame PTS are
+            # known, pace by them — VFR sources (Ruby onboard recordings)
+            # deliver frames slower than the nominal container fps, and a
+            # fixed-fps schedule would mark every frame late and drop it.
             if pts and (pts_base_idx + frame_idx) < len(pts):
                 video_time_s = pts[pts_base_idx + frame_idx]
             else:
                 video_time_s = seek + frame_idx * frame_dur
+            rel = (video_time_s - seek) / speed
             frame_idx += 1
+
+            now = time.monotonic()
+            if t0 is None:
+                # Anchor the playback clock to the first DECODED frame, not
+                # to play() — FFmpeg spawn + seek + decoder init can take a
+                # second, and a clock started back then would put every frame
+                # behind schedule from the outset, with no way to recover.
+                t0 = now - rel
+                self._ffplay_t0 = t0   # keep _display_tick's position in step
+            deadline = t0 + rel
 
             # Frame dropping: when compositing (OSD grid + widgets + map) can't
             # keep up, skip this frame's composite + display so playback stays
             # locked to real time instead of drifting into slow motion. The raw
             # pipe read above already happened, so FFmpeg keeps streaming — we
             # just discard frames we're too late to show. Threshold is one
-            # displayed-frame interval (frame_dur / speed).
-            if (time.monotonic() - deadline) > frame_dur / speed:
-                continue
+            # displayed-frame interval (frame_dur / speed). Dropping is
+            # bounded: past _MAX_PLAYBACK_LAG_S the machine simply can't keep
+            # up, and dropping forever would freeze the preview — re-anchor
+            # the clock to this frame and show it instead.
+            late = now - deadline
+            if late > frame_dur / speed:
+                if late <= _MAX_PLAYBACK_LAG_S:
+                    continue
+                t0 = now - rel
+                self._ffplay_t0 = t0
+                deadline = now
 
             try:
                 pct_norm = video_time_s / self.video_dur if self.video_dur > 0 else 0.0

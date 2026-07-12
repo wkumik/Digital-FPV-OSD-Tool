@@ -455,9 +455,19 @@ def get_video_info(video_path: str) -> dict:
                 info["width"]    = stream.get("width", 0)
                 info["height"]   = stream.get("height", 0)
                 info["codec"]    = stream.get("codec_name", "unknown")
-                rfr              = stream.get("r_frame_rate", "30/1")
-                num, den         = rfr.split("/")
-                info["fps"]      = round(int(num) / max(int(den), 1), 3)
+                # Prefer avg_frame_rate (frames/duration — the true rate for
+                # VFR sources like Ruby onboard recordings) over r_frame_rate,
+                # which reports the nominal/maximum rate. Equal for CFR files.
+                info["fps"] = 30.0
+                for rate_key in ("avg_frame_rate", "r_frame_rate"):
+                    try:
+                        num, den = stream.get(rate_key, "").split("/")
+                        num, den = int(num), int(den)
+                        if num > 0 and den > 0:
+                            info["fps"] = round(num / den, 3)
+                            break
+                    except (ValueError, AttributeError):
+                        pass
                 info["duration"] = float(data.get("format", {}).get("duration", 0))
                 info["size_mb"]  = round(
                     int(data.get("format", {}).get("size", 0)) / 1_048_576, 1)
@@ -469,26 +479,35 @@ def get_video_info(video_path: str) -> dict:
 def get_frame_pts(video_path: str, trim_start: float = 0.0) -> list:
     """Return per-frame PTS list (seconds relative to trim_start) via ffprobe.
 
-    Reads only frame metadata — runs at ~5,000–20,000 fps (< 2 s for a 1 h video).
-    Returns an empty list on any error; caller must fall back to i/fps in that case.
+    Scans packet metadata first — demux only, no decoding, so it runs at I/O
+    speed even for high-bitrate sources (a frame-level scan decodes every
+    frame and can take minutes on a 33 Mbps HEVC recording). Packet order is
+    decode order, so the timestamps are sorted into presentation order. Falls
+    back to the frame-level scan when packets lack usable timestamps.
+    Returns an empty list on any error; caller must fall back to i/fps.
     """
     ffprobe = _find_ffprobe()
     if not ffprobe:
         return []
-    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
-           "-show_entries", "frame=best_effort_timestamp_time",
-           "-of", "csv=p=0", video_path]
-    try:
+
+    def _scan(entries: str) -> list:
+        cmd = [ffprobe, "-v", "error", "-select_streams", "v:0",
+               "-show_entries", entries, "-of", "csv=p=0", video_path]
         result = _hidden_run(cmd, capture_output=True, text=True, timeout=60)
-        pts = []
+        vals = []
         for line in result.stdout.splitlines():
             try:
-                t = float(line.strip())
-                if t >= trim_start:
-                    pts.append(t - trim_start)
+                vals.append(float(line.strip()))
             except ValueError:
-                pass
-        return pts
+                pass   # "N/A" and blank lines
+        return vals
+
+    try:
+        pts = _scan("packet=pts_time")
+        if len(pts) < 10:
+            pts = _scan("frame=best_effort_timestamp_time")
+        pts.sort()
+        return [t - trim_start for t in pts if t >= trim_start]
     except Exception:
         return []
 
