@@ -19,9 +19,10 @@ from PyQt6.QtGui import (
 )
 
 from _player_common import (
-    _SL_MAX, _CACHE_MAX, PIL_OK, PILImage,
+    _SL_MAX, PIL_OK, PILImage,
     rawvideo_cmd, rgba_from_rgb24,
 )
+from _player_extract import FrameCache
 from _player_playback import plan_frame
 from subprocess_utils import _hidden_popen
 from video_processor import find_ffmpeg, get_frame_pts
@@ -1218,8 +1219,7 @@ class PlayerController:
         self._color_vf = ""   # color correction video filter string
 
         # Cache
-        self.cached_frames = {}   # pct -> PIL Image
-        self._cache_max = _CACHE_MAX
+        self.cached_frames = FrameCache()   # pct -> PIL Image
 
         # Seeking
         self._extract_proc = None
@@ -1402,7 +1402,7 @@ class PlayerController:
 
         # Show nearest cached frame as placeholder while extracting
         if self.cached_frames:
-            nearest = min(self.cached_frames, key=lambda k: abs(k - pct))
+            nearest = self.cached_frames.nearest(pct)
             self._show_pct(nearest)
 
         self._pending_pct = pct
@@ -1456,7 +1456,7 @@ class PlayerController:
                 img = rgba_from_rgb24(data, scale_w, scale_h)
                 if img is not None:
                     self.cached_frames[pct] = img
-                    self._evict_cache(pct)
+                    self.cached_frames.evict_around(pct)
                     self.timeline.add_cached(pct / _SL_MAX)
                     def _ready(p=pct):
                         self._show_pct(p)
@@ -1465,11 +1465,6 @@ class PlayerController:
                 pass
 
         threading.Thread(target=_run, daemon=True).start()
-
-    def _evict_cache(self, current_pct):
-        while len(self.cached_frames) > self._cache_max:
-            worst = max(self.cached_frames, key=lambda k: abs(k - current_pct))
-            del self.cached_frames[worst]
 
     def _show_pct(self, pct):
         img = self.cached_frames.get(pct)
@@ -1716,9 +1711,7 @@ class PlayerController:
             pct = int(self.timeline._position * _SL_MAX)
             raw = self.cached_frames.get(pct)
             if raw is None:
-                nearest = min(self.cached_frames.keys(),
-                              key=lambda k: abs(k - pct))
-                raw = self.cached_frames.get(nearest)
+                raw = self.cached_frames.get(self.cached_frames.nearest(pct))
             if raw is not None:
                 self.canvas.set_base_frame(raw)
                 self._update_osd(pct)
