@@ -19,9 +19,10 @@ from PyQt6.QtGui import (
 )
 
 from _player_common import (
-    _SL_MAX, _CACHE_MAX, _MAX_PLAYBACK_LAG_S, PIL_OK, PILImage,
+    _SL_MAX, _CACHE_MAX, PIL_OK, PILImage,
     rawvideo_cmd, rgba_from_rgb24,
 )
+from _player_playback import plan_frame
 from subprocess_utils import _hidden_popen
 from video_processor import find_ffmpeg, get_frame_pts
 from osd_renderer import OsdRenderConfig, render_osd_frame, render_fallback
@@ -1623,16 +1624,11 @@ class PlayerController:
             rel = (video_time_s - seek) / speed
             frame_idx += 1
 
-            now = time.monotonic()
-            if t0 is None:
-                # Anchor the playback clock to the first DECODED frame, not
-                # to play() — FFmpeg spawn + seek + decoder init can take a
-                # second, and a clock started back then would put every frame
-                # behind schedule from the outset, with no way to recover.
-                t0 = now - rel
-                self._ffplay_t0 = t0   # keep _display_tick's position in step
-            deadline = t0 + rel
-
+            # Anchor the playback clock to the first DECODED frame, not to
+            # play() — FFmpeg spawn + seek + decoder init can take a second,
+            # and a clock started back then would put every frame behind
+            # schedule from the outset, with no way to recover.
+            #
             # Frame dropping: when compositing (OSD grid + widgets + map) can't
             # keep up, skip this frame's composite + display so playback stays
             # locked to real time instead of drifting into slow motion. The raw
@@ -1642,13 +1638,13 @@ class PlayerController:
             # bounded: past _MAX_PLAYBACK_LAG_S the machine simply can't keep
             # up, and dropping forever would freeze the preview — re-anchor
             # the clock to this frame and show it instead.
-            late = now - deadline
-            if late > frame_dur / speed:
-                if late <= _MAX_PLAYBACK_LAG_S:
-                    continue
-                t0 = now - rel
-                self._ffplay_t0 = t0
-                deadline = now
+            now = time.monotonic()
+            first = t0 is None
+            action, t0, deadline = plan_frame(now, t0, rel, frame_dur, speed)
+            if first or self._ffplay_t0 != t0:
+                self._ffplay_t0 = t0   # keep _display_tick's position clock in step
+            if action == "drop":
+                continue
 
             img = rgba_from_rgb24(data, w, h)
             if img is None:
