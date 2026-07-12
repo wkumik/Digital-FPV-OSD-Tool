@@ -367,7 +367,7 @@ class FileRow(QWidget):
 
 
 class DropZone(QFrame):
-    file_dropped = pyqtSignal(str)
+    files_dropped = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -414,11 +414,11 @@ class DropZone(QFrame):
 
     def dropEvent(self, event):
         self._update_idle()
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if path and os.path.splitext(path)[1].lower() in self._VALID_EXTS:
-                self.file_dropped.emit(path)
-                break
+        paths = [u.toLocalFile() for u in event.mimeData().urls()]
+        paths = [p for p in paths
+                 if p and os.path.splitext(p)[1].lower() in self._VALID_EXTS]
+        if paths:
+            self.files_dropped.emit(paths)
         event.acceptProposedAction()
 
 
@@ -953,7 +953,7 @@ class MainWindow(QMainWindow):
         fgl.setContentsMargins(10, 16, 10, 10)
 
         self.drop_zone = DropZone()
-        self.drop_zone.file_dropped.connect(self._on_file_dropped)
+        self.drop_zone.files_dropped.connect(self._on_files_dropped)
         fgl.addWidget(self.drop_zone)
 
         self.video_row = FileRow("Video",  "Select video…",  "Video (*.mp4 *.ts *.mkv *.avi *.mov)",
@@ -1486,13 +1486,19 @@ class MainWindow(QMainWindow):
         self._sync_lbl.setStyleSheet(f"color:{_T()['subtext']};font-size:{_fs(11)}px;")
         self._sync_lbl.setFixedWidth(72)
         self.osd_offset_sb = QSpinBox()
-        self.osd_offset_sb.setRange(-10000, 10000)
+        # ±10 min: ground-station .osd/.srt recordings can start long before
+        # an onboard (rec_*.mp4) recording, so the offset may be tens of
+        # seconds or more.
+        self.osd_offset_sb.setRange(-600000, 600000)
         self.osd_offset_sb.setValue(_OSD_OFFSET_MS)
         self.osd_offset_sb.setSuffix(" ms")
         self.osd_offset_sb.setToolTip(
             "Shift OSD timestamps relative to video.\n"
             "+500 ms → OSD shows data 500 ms later (compensates OSD lagging behind).\n"
-            "−500 ms → OSD shows data 500 ms earlier.")
+            "−500 ms → OSD shows data 500 ms earlier.\n"
+            "Onboard video + ground-recorded .osd/.srt: set this to how long the\n"
+            "ground recording had been running when the onboard recording started\n"
+            "(often tens of seconds).")
         self.osd_offset_sb.setStyleSheet(
             f"QSpinBox{{background:{_T()['surface']};color:{_T()['text']};"
             f"border:1px solid {_T()['border2']};border-radius:4px;padding:3px 6px;}}"
@@ -2130,55 +2136,60 @@ class MainWindow(QMainWindow):
 
     # ── File selection ────────────────────────────────────────────────────────
 
-    def _on_file_dropped(self, path):
-        ext = os.path.splitext(path)[1].lower()
-        if ext in ('.mp4', '.ts', '.mkv', '.avi', '.mov'):
-            self.video_row.set_path(path)
+    _VIDEO_EXTS = ('.mp4', '.ts', '.mkv', '.avi', '.mov')
+
+    def _on_files_dropped(self, paths):
+        """Handle one drop that may contain several files (video + .osd + .srt).
+
+        Files dropped together are paired with each other even when their
+        filename stems differ — e.g. a Ruby onboard recording (rec_*.mp4)
+        dropped alongside the ground station's video-none-*.osd/.srt.
+        Stem-based auto-detection only fills in whatever wasn't dropped.
+        """
+        def _ext(p): return os.path.splitext(p)[1].lower()
+        video = next((p for p in paths if _ext(p) in self._VIDEO_EXTS), None)
+        osd   = next((p for p in paths if _ext(p) == '.osd'), None)
+        srt   = next((p for p in paths if _ext(p) == '.srt'), None)
+        if video:
+            self.video_row.set_path(video)
             # Clear companion data from the previous flight so the map
             # doesn't show a stale track if the new video has no .srt/.osd.
             self.srt_data = None
             self.osd_data = None
             invalidate_track_caches()
             self._refresh_map_box()
-            self._load_video(path)
-            self._auto_detect(path)
-        elif ext == '.osd':
-            self._load_osd(path)
-            self._auto_detect(path)
-        elif ext == '.srt':
-            self._load_srt(path)
-            self._auto_detect(path)
+            self._load_video(video)
+        if osd: self._load_osd(osd)
+        if srt: self._load_srt(srt)
+        self._auto_detect(video or osd or srt, have_video=bool(video),
+                          have_osd=bool(osd), have_srt=bool(srt))
 
-    def _auto_detect(self, base_path):
+    def _auto_detect(self, base_path, have_video=False, have_osd=False,
+                     have_srt=False):
+        """Load stem-matched companion files for whatever wasn't supplied
+        explicitly (have_* flags mark files the user already picked/dropped)."""
         p = Path(base_path); stem = p.stem; dirp = p.parent
-        ext = p.suffix.lower()
         osd_c = dirp / (stem + ".osd")
         srt_c = dirp / (stem + ".srt")
+        if not have_osd:
+            if osd_c.exists():
+                self._load_osd(str(osd_c))
+            elif have_video:
+                self._try_load_p1_osd(base_path)
+        if not have_srt and srt_c.exists():
+            self._load_srt(str(srt_c))
         # Video companion: first matching container that exists on disk. .mp4
         # is preferred (most reliable seeking); .ts comes from Ruby onboard
         # recordings, which write a stem-matched .osd sidecar alongside it.
-        video_c = None
-        for vext in ('.mp4', '.ts', '.mkv', '.avi', '.mov'):
-            cand = dirp / (stem + vext)
-            if cand.exists():
-                video_c = cand
-                break
-        if ext in ('.mp4', '.ts', '.mkv', '.avi', '.mov'):
-            if osd_c.exists():
-                self._load_osd(str(osd_c))
-            else:
-                self._try_load_p1_osd(base_path)
-            if srt_c.exists(): self._load_srt(str(srt_c))
-        elif ext == '.osd':
-            if srt_c.exists(): self._load_srt(str(srt_c))
-            if video_c is not None:
-                self.video_row.set_path(str(video_c))
-                self._load_video(str(video_c))
-        elif ext == '.srt':
-            if osd_c.exists(): self._load_osd(str(osd_c))
-            if video_c is not None:
-                self.video_row.set_path(str(video_c))
-                self._load_video(str(video_c))
+        # Never replace a video the user already loaded — a lone .osd/.srt
+        # drop attaches to the current video (its name may not match).
+        if not have_video and not self.video_row.path:
+            for vext in self._VIDEO_EXTS:
+                cand = dirp / (stem + vext)
+                if cand.exists():
+                    self.video_row.set_path(str(cand))
+                    self._load_video(str(cand))
+                    break
 
     # ── Theme ─────────────────────────────────────────────────────────────────
 
@@ -2390,7 +2401,7 @@ class MainWindow(QMainWindow):
         invalidate_track_caches()
         self._refresh_map_box()
         self._load_video(p)
-        self._auto_detect(p)
+        self._auto_detect(p, have_video=True)
 
     def _manual_osd(self):
         p, _ = QFileDialog.getOpenFileName(self, "Select OSD File", "", "OSD (*.osd)")
