@@ -284,6 +284,57 @@ def _parse_msposd(raw: bytes, video_fps: float = 60.0) -> OsdFile:
 
 # ── Ruby format parser ────────────────────────────────────────────────────────
 
+# Bounds used to sanity-check a candidate frame stride (see _ts_plausible).
+# Frame timestamps are ms since recording start: no flight runs a day, and
+# consecutive OSD frames are tens of ms apart, never tens of seconds.
+MAX_PLAUSIBLE_TS_MS   = 24 * 60 * 60 * 1000
+MAX_PLAUSIBLE_STEP_MS = 10_000
+
+
+def _ts_plausible(raw: bytes, frame_size: int, n_frames: int,
+                  probes: int = 8) -> bool:
+    """Corroborate a candidate frame stride by reading the timestamps it implies.
+
+    Frames are fixed-size blocks with no separators, so the stride is the only
+    thing locating frame N.  Get it wrong and the u32 read at each frame offset
+    is really glyph data — two MSP char codes — which shows up as a timestamp
+    that jumps by minutes, goes backwards, or never advances at all.
+    """
+    n = min(n_frames, probes)
+    if n < 2:
+        return False                    # nothing to corroborate against
+
+    first = prev = struct.unpack_from('<I', raw, HEADER_SIZE)[0]
+    if first > MAX_PLAUSIBLE_TS_MS:
+        return False
+    for i in range(1, n):
+        ts = struct.unpack_from('<I', raw, HEADER_SIZE + i * frame_size)[0]
+        if ts < prev or ts - prev > MAX_PLAUSIBLE_STEP_MS:
+            return False
+        prev = ts
+    return prev > first                 # the track has to actually advance
+
+
+def _dims_credible(raw: bytes, cols: int, rows: int) -> bool:
+    """Decide whether header-declared grid dims match the file's real layout."""
+    if not (30 <= cols <= 120 and 10 <= rows <= 60):
+        return False
+
+    frame_size = 4 + cols * rows * 2
+    payload    = len(raw) - HEADER_SIZE
+    n_frames   = payload // frame_size
+    if n_frames < 1:
+        return False
+    if payload % frame_size == 0:
+        return True
+
+    # Leftover bytes mean a partial final frame — normal when a recording is
+    # cut off mid-write (battery pull, crash, goggles unplugged).  _parse_ruby
+    # floors n_frames so the stub is dropped anyway; rejecting the dims over it
+    # would fall back to the 53x20 default and misread the whole file.
+    return _ts_plausible(raw, frame_size, n_frames)
+
+
 def _parse_ruby(raw: bytes) -> OsdFile:
     """Parse a Ruby-firmware-format .osd file (DJI V2 / standard)."""
     if len(raw) < HEADER_SIZE:
@@ -300,15 +351,17 @@ def _parse_ruby(raw: bytes) -> OsdFile:
     # (e.g. "DJO3") appears at bytes 32-35.  When present and valid, these
     # override the default 53x20 grid.
     grid_cols, grid_rows = GRID_COLS, GRID_ROWS
-    if len(raw) >= 40:
-        hdr_cols = struct.unpack_from('<H', raw, 36)[0]
-        hdr_rows = struct.unpack_from('<H', raw, 38)[0]
-        if 30 <= hdr_cols <= 120 and 10 <= hdr_rows <= 60:
-            chars  = hdr_cols * hdr_rows
-            fsize  = 4 + chars * 2
-            remainder = (len(raw) - HEADER_SIZE) % fsize
-            if remainder == 0 and (len(raw) - HEADER_SIZE) // fsize > 0:
-                grid_cols, grid_rows = hdr_cols, hdr_rows
+    hdr_cols = struct.unpack_from('<H', raw, 36)[0]
+    hdr_rows = struct.unpack_from('<H', raw, 38)[0]
+    if hdr_cols or hdr_rows:
+        if _dims_credible(raw, hdr_cols, hdr_rows):
+            grid_cols, grid_rows = hdr_cols, hdr_rows
+        else:
+            # Silently falling back here is how a mis-sized grid turns into
+            # "the OSD is scattered all over the frame" with no way to tell why.
+            print(f"[osd_parser] header declares a {hdr_cols}x{hdr_rows} grid "
+                  f"that does not match the file layout; falling back to "
+                  f"{GRID_COLS}x{GRID_ROWS}")
 
     chars_per_frame = grid_cols * grid_rows
     frame_size      = 4 + chars_per_frame * 2
