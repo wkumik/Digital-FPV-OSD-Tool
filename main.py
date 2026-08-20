@@ -66,7 +66,7 @@ from ui_widgets import (FileRow, DropZone, LabeledSlider, CheckableComboBox,
 
 # ─── Version ──────────────────────────────────────────────────────────────────
 
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 
 _SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
